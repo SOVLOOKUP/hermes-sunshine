@@ -78,13 +78,26 @@ disable this path.
 
 ## Quick start
 
+The compose file pulls the prebuilt image from GHCR — no local build needed:
+
 ```bash
-# build + run
-docker compose up -d --build
+# pull + run
+docker compose up -d
 
 # follow logs
 docker compose logs -f
 ```
+
+**China users:** for a much faster pull, edit `docker-compose.yml` and switch the
+`image:` line to the Nanjing University GHCR mirror:
+
+```yaml
+# image: ghcr.io/sovlookup/hermes-sunshine:latest
+image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
+```
+
+To build the image yourself instead of pulling it, uncomment the `build:` block
+at the bottom of `docker-compose.yml` and run `docker compose up -d --build`.
 
 Then open the web UI and set an admin username/password:
 
@@ -129,11 +142,14 @@ docker build -t hermes-sunshine:latest \
 
 The bundled **GitHub Actions** workflow
 ([`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml))
-builds and pushes images to **GHCR** (`ghcr.io/<owner>/<repo>`):
+builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`):
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest          # newest build
-docker pull ghcr.io/<owner>/<repo>:hermes-v0.4.0   # pinned to a Hermes release
+docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
+docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0   # pinned to a Hermes release
+
+# China: use the Nanjing University GHCR mirror for a faster pull
+docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
 ```
 
 It runs on three triggers:
