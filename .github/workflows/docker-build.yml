@@ -1,0 +1,142 @@
+name: Build & publish Docker image
+
+# Builds the Hermes/Sunshine image on GitHub-hosted runners. These live outside
+# China, so USE_CN_MIRROR is forced to "false" to use the default global CDN
+# (the USTC/Tsinghua mirrors are only fast from inside China).
+#
+# Besides the usual push/PR CI, a daily schedule follows upstream Hermes
+# releases (https://github.com/MrOz59/Hermes): it resolves the latest release
+# tag and, if no image has been published for it yet, builds + pushes one tagged
+# `hermes-<tag>` and updates `latest`. Trigger a specific build by hand from the
+# Actions tab (workflow_dispatch) with an optional tag / force flag.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC — follow upstream Hermes releases
+  workflow_dispatch:
+    inputs:
+      hermes_ref:
+        description: "Hermes release tag to build (or 'latest')"
+        default: latest
+        required: false
+      force:
+        description: "Rebuild even if the image tag already exists"
+        type: boolean
+        default: false
+
+env:
+  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: ghcr.io
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Resolve the target Hermes release and decide whether an image is needed.
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      hermes_ref: ${{ steps.r.outputs.hermes_ref }}
+      should_build: ${{ steps.r.outputs.should_build }}
+    steps:
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Hermes release and decide whether to build
+        id: r
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_REF: ${{ github.event.inputs.hermes_ref }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+
+          # Pick the Hermes release: an explicit dispatch input wins, otherwise
+          # follow the upstream "latest" release.
+          ref="${INPUT_REF:-latest}"
+          if [ -z "${ref}" ] || [ "${ref}" = "latest" ]; then
+            ref="$(gh api repos/MrOz59/Hermes/releases/latest --jq .tag_name)"
+          fi
+          echo "Resolved Hermes release: ${ref}"
+          echo "hermes_ref=${ref}" >> "$GITHUB_OUTPUT"
+
+          # Always build for push/PR/manual events (code may have changed). On
+          # the daily schedule, build only when this Hermes release has not been
+          # published yet (unless forced).
+          should_build=true
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${FORCE:-false}" != "true" ]; then
+            image="${REGISTRY}/${IMAGE_NAME,,}:hermes-${ref}"
+            if docker manifest inspect "${image}" >/dev/null 2>&1; then
+              echo "::notice::${image} already published — nothing to do."
+              should_build=false
+            else
+              echo "::notice::New Hermes release ${ref} — building ${image}."
+            fi
+          fi
+          echo "should_build=${should_build}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=hermes-${{ needs.resolve.outputs.hermes_ref }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Outside China: use the default global CDN, not the CN mirrors. Pin
+          # the exact Hermes release resolved above so the image content matches
+          # its `hermes-<tag>` tag (no drift if upstream releases mid-build).
+          build-args: |
+            USE_CN_MIRROR=false
+            HERMES_REF=${{ needs.resolve.outputs.hermes_ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

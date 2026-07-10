@@ -1,0 +1,28 @@
+### Hermes streaming Wayland session (sway / wlroots) ###
+#
+# This is a template. The entrypoint substitutes the __PLACEHOLDERS__ (currently
+# only ENABLE_XWAYLAND) and writes the effective config to /run/hermes/sway.config
+# before launching sway.
+#
+# The virtual output is provided by the Hermes-KMS kernel module loaded on the
+# HOST (connector HERMES-1 / Virtual-*). sway drives it via the wlroots DRM
+# backend and Hermes captures the scanout zero-copy from the hermes_kms render
+# node. When the module/device is absent the entrypoint falls back to the
+# wlroots headless backend (software output). The output name therefore varies,
+# so the resolution is applied at runtime by the entrypoint via swaymsg rather
+# than hardcoded here.
+
+# Streaming-friendly defaults: no decorations, hide the idle cursor.
+default_border none
+default_floating_border none
+seat * hide_cursor 5000
+focus_follows_mouse no
+
+# Export the session environment to the user D-Bus + systemd (best effort).
+exec_always dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
+
+# X11 application support. Toggled by ENABLE_XWAYLAND (enable/disable).
+__XWAYLAND__
+
+# User overrides: drop *.conf snippets into ./config/sway.d/ on the host.
+include /config/sway.d/*

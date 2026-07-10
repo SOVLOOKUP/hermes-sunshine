@@ -1,0 +1,92 @@
+services:
+  hermes:
+    # -----------------------------------------------------------------------
+    # HOST PREREQUISITE for the virtual display:
+    # Load the Hermes-KMS kernel module on the HOST (not in the container):
+    #   https://github.com/MrOz59/Hermes-KMS  (DKMS, then:)
+    #   sudo modprobe hermes_kms initial_enabled=1   # or insmod the built .ko
+    # It creates a virtual DRM card (output HERMES-1) + render node. Passing
+    # /dev/dri into the container lets sway drive that output and lets Hermes
+    # capture its scanout zero-copy. Without the module the container falls
+    # back to a wlroots headless (software) output automatically.
+    # -----------------------------------------------------------------------
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Hermes release to install: "latest" or a specific tag (e.g. v0.4.0).
+        HERMES_REF: latest
+        # Use fast China mirrors (USTC + Tsinghua) for pacman. Set to "false"
+        # when building outside China so the default global CDN is used.
+        USE_CN_MIRROR: "true"
+    image: hermes-sunshine:latest
+    container_name: hermes
+    restart: unless-stopped
+
+    # Shared memory + IPC for the compositor / encode pipeline.
+    ipc: host
+    shm_size: "1gb"
+
+    # KMS/DRM screen capture and /dev/uinput virtual input both need SYS_ADMIN.
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+
+    devices:
+      # DRM devices: the host Hermes-KMS virtual card (sway drives its HERMES-1
+      # output) AND the real GPU render node (rendering + VAAPI/NVENC encode).
+      # Both live under /dev/dri once hermes_kms is loaded on the host.
+      - /dev/dri:/dev/dri
+      # Virtual input devices (gamepad / keyboard / mouse injection).
+      - /dev/uinput:/dev/uinput
+
+    environment:
+      # Timezone follows the host: the /etc/localtime bind mount below inherits
+      # the host's zone automatically. Set TZ on the host env (or here, e.g.
+      # "Asia/Shanghai") to override; leave it and the mount decides.
+      TZ: ${TZ:-}
+      # Virtual display source: auto = use the host Hermes-KMS DRM card when
+      # present, else fall back to a wlroots headless (software) output.
+      # Force with "on" / "off".
+      HERMES_KMS: auto
+      # Virtual output geometry served to Moonlight clients.
+      DISPLAY_WIDTH: "1920"
+      DISPLAY_HEIGHT: "1080"
+      DISPLAY_REFRESH: "60"
+      # Session feature toggles.
+      START_COMPOSITOR: "true"   # Wayland (sway) session
+      START_PULSE: "true"
+      START_AVAHI: "true"
+      ENABLE_XWAYLAND: "true"    # X11 app compatibility inside the Wayland session
+
+    volumes:
+      - ./config:/config
+      # Inherit the host timezone (read-only). On Arch/CachyOS hosts this is a
+      # symlink into /usr/share/zoneinfo, which Docker resolves to the zone file.
+      - /etc/localtime:/etc/localtime:ro
+
+    # Sunshine/Moonlight ports. Host networking (network_mode: host) is the most
+    # reliable option for client discovery; the explicit mappings below work when
+    # host networking is unavailable (e.g. Docker Desktop).
+    ports:
+      - "47984-47990:47984-47990/tcp"
+      - "48010:48010/tcp"
+      - "47998-48000:47998-48000/udp"
+
+    # ---- NVIDIA GPUs -------------------------------------------------------
+    # Install the NVIDIA Container Toolkit on the host, then uncomment the block
+    # below (and drop the /dev/dri device if not needed). NVENC availability
+    # depends on how the prebuilt Hermes package was compiled upstream.
+    #
+    # runtime: nvidia
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # environment:
+    #   NVIDIA_VISIBLE_DEVICES: all
+    #   NVIDIA_DRIVER_CAPABILITIES: all

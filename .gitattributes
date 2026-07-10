@@ -1,0 +1,4 @@
+# This is a Linux container project: keep every text file LF so the shell
+# entrypoint, the Dockerfile, and the rootfs configs stay valid inside the image
+# regardless of the OS it is checked out on.
+* text=auto eol=lf
