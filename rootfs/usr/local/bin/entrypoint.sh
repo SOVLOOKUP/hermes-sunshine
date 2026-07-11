@@ -223,15 +223,29 @@ launch_sway() {
 
 # Environment for the DRM (KMS) backend: drive the Hermes-KMS card, render on the
 # real GPU, and open the device through a seatd session.
+#
+# We run a "drm,headless" multi-backend on purpose. The DRM backend on the
+# Hermes-KMS card adopts the per-session "Virtual-1" connector that Hermes
+# hotplugs, while a single headless output stays present so the compositor never
+# exposes an empty output layout. That placeholder is load-bearing: Hermes'
+# wl::configure_virtual_output() returns immediately when the layout is empty and
+# only enters its hotplug-wait retry loop once at least one head exists. With zero
+# idle outputs it queried wlr-output-management in the same millisecond it created
+# the connector — before wlroots had processed the DRM hotplug — and always lost
+# the race ("output-management returned no complete output layout"). The
+# placeholder lives on the headless backend, not on card1, so it never drives the
+# DRM_IOCTL_MODE_CREATE_DUMB path; Hermes selects "Virtual-1" by name for capture
+# and reads it zero-copy, ignoring the placeholder.
 setup_kms_env() {
     start_seat
     export LIBSEAT_BACKEND=seatd
+    export WLR_BACKENDS=drm,headless
+    export WLR_HEADLESS_OUTPUTS=1
     export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
     export WLR_RENDERER="${WLR_RENDERER:-gles2}"
     [ -n "${RENDER_NODE}" ] && \
         export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
     export WLR_LIBINPUT_NO_DEVICES=1
-    unset WLR_BACKENDS WLR_HEADLESS_OUTPUTS
 }
 
 # Environment for the headless backend: a software/GPU-rendered virtual output
@@ -307,15 +321,25 @@ start_compositor() {
     fi
 
     if [ "${compositor_kind}" = "kms" ]; then
-        # On the Hermes-KMS DRM backend, sway must idle with NO output of its own.
-        # For each stream Hermes creates a per-session HERMES-1 virtual display
-        # (enabled by headless_mode in sunshine.conf), which hotplugs a "Virtual-1"
-        # DRM connector on this card; sway then adopts it via wlr-output-management
-        # and scans the desktop onto it, and Hermes reads it zero-copy from the
-        # hermes_kms render node. Creating a headless output here — or forcing a
-        # mode — would instead hand Hermes a software surface to capture, which is
-        # exactly what triggered the DRM_IOCTL_MODE_CREATE_DUMB failures.
-        log "sway idling on ${HERMES_KMS_CARD}; Hermes will hotplug its virtual output per session"
+        # sway is on a drm,headless multi-backend: the DRM backend adopts the
+        # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
+        # by headless_mode in sunshine.conf) and Hermes reads that connector
+        # zero-copy; the headless backend contributes one idle placeholder output.
+        # The placeholder is what lets Hermes' virtual-output activation succeed:
+        # it bails instantly on an empty output layout and only waits for the
+        # hotplug once a head exists (see setup_kms_env). We must NOT force a mode
+        # onto card1 here — Hermes owns "Virtual-1" per session, and capture picks
+        # the output by connector name, so the placeholder is harmless.
+        # Some wlroots builds bring the headless backend up with zero outputs, which
+        # would defeat the placeholder, so create one explicitly if the layout is
+        # still empty.
+        local heads
+        heads="$(swaymsg -t get_outputs 2>/dev/null | grep -c '"name"' || true)"
+        if [ "${heads:-0}" -eq 0 ]; then
+            swaymsg create_output >/dev/null 2>&1 || true
+            sleep 0.3
+        fi
+        log "sway idling on ${HERMES_KMS_CARD} with a headless placeholder; Hermes will hotplug Virtual-1 per session"
     else
         # Headless fallback: Hermes captures sway's own output directly, so ensure
         # one exists and carries the requested mode.
