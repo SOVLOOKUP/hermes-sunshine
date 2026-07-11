@@ -200,6 +200,12 @@ The virtual output resolution is set at runtime from `DISPLAY_WIDTH`/`HEIGHT`/
 `REFRESH`. Drop extra sway snippets into `./config/sway.d/*.conf` on the host to
 customise the session (they are `include`d by the generated config).
 
+On a fresh `/config` volume the entrypoint seeds `sunshine.conf` with sensible
+defaults (`address_family = both`, `upnp = enabled`,
+`virtual_display_backend = hermes_kms`) before starting Hermes. It only seeds
+when the file is absent, so edits you make in the web UI (which Hermes writes
+back to the same file) are never overwritten.
+
 ## Ports
 
 | Port(s)         | Proto | Purpose                               |
@@ -248,6 +254,13 @@ initial_enabled=1`); it cannot be loaded from inside a container. sway (in the
 - **Real GPU still needed.** Hermes-KMS is not a render GPU — rendering and
   encoding run on a real GPU that imports the exported DMA-BUFs, so `/dev/dri`
   must be passed through.
+- **EVDI warning is harmless.** EVDI is a _separate_ virtual-display backend
+  (DisplayLink-derived) that Hermes probes at startup. This image uses the
+  Hermes-KMS path instead, so the "EVDI userspace library is missing" notice in
+  the UI is expected and can be ignored. The `evdi` package is AUR-only and its
+  kernel module would have to be loaded on the host in place of `hermes_kms`, so
+  it is intentionally not bundled. Clipboard sync, however, works out of the box
+  (`wl-clipboard` + `xclip` are preinstalled).
 - **Root & SYS_ADMIN.** The container runs as root and requests `SYS_ADMIN` so it
   can capture the display and inject input. Treat it like any privileged
   streaming host and keep it on a trusted network / behind a firewall.

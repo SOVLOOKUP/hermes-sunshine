@@ -78,7 +78,8 @@ RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/shar
 # Download the prebuilt Hermes Arch package from GitHub releases and install it
 # with `pacman -U` (which resolves + installs its runtime deps from the repos),
 # then add the headless Wayland session stack (sway/wlroots, PulseAudio, dbus,
-# avahi, Mesa/VAAPI, XWayland).
+# avahi, Mesa/VAAPI, XWayland) plus the clipboard tools Hermes shells out to
+# (wl-clipboard's wl-copy/wl-paste on Wayland, xclip on X11).
 #
 # We resolve the release WITHOUT the GitHub REST API (it 403s for unauthenticated
 # datacenter IPs). "latest" is resolved via the /releases/latest redirect, and
@@ -103,6 +104,8 @@ RUN pacman -Syu --noconfirm --needed curl \
     seatd \
     wlr-randr \
     xorg-xwayland \
+    wl-clipboard \
+    xclip \
     foot \
     pulseaudio \
     pulseaudio-alsa \

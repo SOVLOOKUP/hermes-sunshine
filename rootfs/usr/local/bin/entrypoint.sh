@@ -62,6 +62,7 @@ start_avahi() {
 # --- device detection: Hermes-KMS virtual display + real render GPU ---------
 HERMES_KMS_CARD=""   # DRM card node backed by the host hermes_kms.ko module
 RENDER_NODE=""       # real GPU render node used for rendering + encoding
+KMS_ZEROCOPY="false" # true once sway is actually up on the Hermes-KMS DRM card
 
 drm_driver() {
     # Print the kernel driver name for a /dev/dri/<node> (card* or renderD*).
@@ -133,9 +134,15 @@ start_seat() {
     # stays inactive, making wlroots time out ("waiting session to become
     # active"). A VT-free seat is activated immediately, so the DRM/KMS path can
     # actually come up inside the container.
-    if [ -S /run/seatd.sock ]; then
+    # A leftover /run/seatd.sock from a previous container run (whose seatd died
+    # on restart) makes libseat's client get ECONNREFUSED, so wlroots' DRM backend
+    # aborts within milliseconds and sway never brings up a Wayland socket. Only
+    # reuse the socket when a live seatd actually owns it; otherwise drop the stale
+    # socket and respawn.
+    if pgrep -x seatd >/dev/null 2>&1 && [ -S /run/seatd.sock ]; then
         return 0
     fi
+    rm -f /run/seatd.sock
     SEATD_VTBOUND=0 seatd > /var/log/seatd.log 2>&1 &
     PIDS+=("$!")
     local _
@@ -234,11 +241,14 @@ start_compositor() {
     export XDG_CURRENT_DESKTOP=sway
 
     local started="false"
+    local compositor_kind=""
     if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
         log "starting sway on the Hermes-KMS DRM output (${HERMES_KMS_CARD})"
         setup_kms_env
         if launch_sway; then
             started="true"
+            compositor_kind="kms"
+            KMS_ZEROCOPY="true"
             log "Wayland session up on the Hermes-KMS output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
         else
             warn "sway could not start on the Hermes-KMS DRM output; see /var/log/sway.log"
@@ -256,6 +266,7 @@ start_compositor() {
         setup_headless_env
         if launch_sway; then
             started="true"
+            compositor_kind="headless"
             log "Wayland session up on a headless output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
         fi
     fi
@@ -266,27 +277,40 @@ start_compositor() {
         return 1
     fi
 
-    # Apply the requested mode on whatever output the backend created.
-    local out
-    out="$(swaymsg -t get_outputs 2>/dev/null \
-        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-        | sed -E 's/.*"([^"]+)"$/\1/')"
-    if [ -z "${out}" ]; then
-        # Some wlroots builds start the headless backend with zero outputs;
-        # create one explicitly so there is a surface to capture.
-        swaymsg create_output >/dev/null 2>&1 || true
-        sleep 0.3
+    if [ "${compositor_kind}" = "kms" ]; then
+        # On the Hermes-KMS DRM backend, sway must idle with NO output of its own.
+        # For each stream Hermes creates a per-session HERMES-1 virtual display
+        # (enabled by headless_mode in sunshine.conf), which hotplugs a "Virtual-1"
+        # DRM connector on this card; sway then adopts it via wlr-output-management
+        # and scans the desktop onto it, and Hermes reads it zero-copy from the
+        # hermes_kms render node. Creating a headless output here — or forcing a
+        # mode — would instead hand Hermes a software surface to capture, which is
+        # exactly what triggered the DRM_IOCTL_MODE_CREATE_DUMB failures.
+        log "sway idling on ${HERMES_KMS_CARD}; Hermes will hotplug its virtual output per session"
+    else
+        # Headless fallback: Hermes captures sway's own output directly, so ensure
+        # one exists and carries the requested mode.
+        local out
         out="$(swaymsg -t get_outputs 2>/dev/null \
             | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
             | sed -E 's/.*"([^"]+)"$/\1/')"
-    fi
-    if [ -n "${out}" ]; then
-        log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
-        swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-            || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-            || warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out}"
-    else
-        warn "could not determine the compositor output name (see /var/log/sway.log)"
+        if [ -z "${out}" ]; then
+            # Some wlroots builds start the headless backend with zero outputs;
+            # create one explicitly so there is a surface to capture.
+            swaymsg create_output >/dev/null 2>&1 || true
+            sleep 0.3
+            out="$(swaymsg -t get_outputs 2>/dev/null \
+                | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+                | sed -E 's/.*"([^"]+)"$/\1/')"
+        fi
+        if [ -n "${out}" ]; then
+            log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
+            swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
+                || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
+                || warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out}"
+        else
+            warn "could not determine the compositor output name (see /var/log/sway.log)"
+        fi
     fi
 
     # Surface the XWayland DISPLAY for X11-only apps launched by the host.
@@ -320,6 +344,35 @@ start_pulse() {
     fi
 }
 
+# --- seed the required config keys ------------------------------------------
+# Hermes rewrites this file itself whenever you change settings in the web UI,
+# so merge idempotently: add each required key only when it is absent, and never
+# overwrite a value the user (or Hermes) has already written. These keys enable
+# the Hermes-KMS virtual display backend, dual-stack networking and UPnP.
+ensure_conf_key() {
+    local key="$1" val="$2"
+    if ! grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "${HERMES_CONFIG}" 2>/dev/null; then
+        printf '%s = %s\n' "${key}" "${val}" >> "${HERMES_CONFIG}"
+        log "config: added ${key} = ${val}"
+    fi
+}
+
+seed_config() {
+    mkdir -p "$(dirname "${HERMES_CONFIG}")"
+    touch "${HERMES_CONFIG}"
+    ensure_conf_key address_family both
+    ensure_conf_key upnp enabled
+    ensure_conf_key system_tray disabled
+    ensure_conf_key virtual_display_backend hermes_kms
+    # headless_mode makes Hermes create a per-session HERMES-1 virtual display —
+    # the zero-copy capture target on the Hermes-KMS card. Only enable it when
+    # that card is actually driving sway; on the software headless fallback there
+    # is no backend to create the display, so the session would fail instead.
+    if [ "${KMS_ZEROCOPY}" = "true" ]; then
+        ensure_conf_key headless_mode enabled
+    fi
+}
+
 # --- bring up the session ---------------------------------------------------
 start_dbus
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
@@ -338,6 +391,7 @@ else
     warn "/dev/dri not present — no GPU. Wayland capture/hardware encoding will not work."
 fi
 
+seed_config
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"
 cd /config
