@@ -157,6 +157,35 @@ start_seat() {
     fi
 }
 
+# --- udev (so wlroots sees the Hermes-KMS virtual-connector hotplug) --------
+# The Hermes-KMS virtual output is a DRM connector ("Virtual-1") that is hotplugged
+# onto card1 only when a stream starts. wlroots' DRM backend learns about hotplugs
+# through a libudev monitor on the "udev" netlink group, which is populated by
+# udevd. With no udevd running, sway never adopts the connector, exposes zero
+# outputs, and Hermes reports "The compositor did not activate the Hermes-KMS
+# output". Run udevd so the monitor is live before the first stream. (network_mode:
+# host puts us in the host net namespace, so the host kernel's uevents reach us.)
+start_udev() {
+    if pgrep -x systemd-udevd >/dev/null 2>&1 || pgrep -x udevd >/dev/null 2>&1; then
+        return 0
+    fi
+    local udevd="" cand
+    for cand in /usr/lib/systemd/systemd-udevd /usr/lib/udev/udevd /sbin/udevd /usr/bin/udevd; do
+        [ -x "${cand}" ] && { udevd="${cand}"; break; }
+    done
+    if [ -z "${udevd}" ]; then
+        warn "udevd not found; wlroots may not see the Hermes-KMS hotplug (install systemd/udev)"
+        return 1
+    fi
+    "${udevd}" --daemon 2>/var/log/udevd.log \
+        && log "udevd started (${udevd})" \
+        || { warn "udevd failed to start (see /var/log/udevd.log)"; return 1; }
+    # Prime the DRM subsystem so any already-present connector is tagged, then wait
+    # for the queue to drain before sway enumerates outputs.
+    udevadm trigger --subsystem-match=drm --action=add >/dev/null 2>&1 || true
+    udevadm settle --timeout=5 >/dev/null 2>&1 || true
+}
+
 # --- Wayland compositor (sway): KMS output with headless fallback -----------
 
 # Start sway in the background with the currently exported WLR_* environment and
@@ -378,6 +407,7 @@ start_dbus
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
 if [ "${START_COMPOSITOR}" = "true" ]; then
     detect_devices
+    start_udev || warn "continuing without udev (Hermes-KMS hotplug may not be seen)"
     start_compositor || warn "continuing without a Wayland session (capture will fail)"
 fi
 [ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; }
