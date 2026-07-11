@@ -107,6 +107,7 @@ RUN pacman -Syu --noconfirm --needed curl \
     wl-clipboard \
     xclip \
     foot \
+    jq \
     pulseaudio \
     pulseaudio-alsa \
     tzdata \

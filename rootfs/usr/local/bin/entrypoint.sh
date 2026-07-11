@@ -7,6 +7,7 @@ log()  { printf '\033[0;36m[hermes]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[0;33m[hermes][warn]\033[0m %s\n' "$*" >&2; }
 
 HERMES_CONFIG="${HERMES_CONFIG:-/config/sunshine.conf}"
+APPS_JSON="${APPS_JSON:-/config/.config/sunshine/apps.json}"
 SWAY_TEMPLATE="/etc/sway/config"
 SWAY_CONFIG="/run/hermes/sway.config"
 PIDS=()
@@ -397,6 +398,34 @@ start_pulse() {
     fi
 }
 
+# --- GPU access for the non-root steam user ---------------------------------
+# The passed-through /dev/dri nodes keep the HOST's group IDs (e.g. render=105,
+# card/video=44), which almost never match the container's own render/video
+# groups. root owns the nodes so Hermes is unaffected, but the steam user then
+# can't open renderD128 — gamescope's Vulkan device enumeration fails ("failed
+# to find physical device"), it aborts, and the streamed Virtual-1 stays black.
+# Grant access by making steam a member of a group whose GID equals each node's
+# actual owner GID (creating that group when the host GID is unknown in the
+# container). Must run before we spawn gamescope; the build-time `usermod -aG
+# render` can't cover a GID that only exists at runtime.
+grant_gpu_access() {
+    local user="$1" node gid gname
+    id "${user}" >/dev/null 2>&1 || return 0
+    for node in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
+        [ -e "${node}" ] || continue
+        gid="$(stat -c '%g' "${node}" 2>/dev/null)" || continue
+        [ -n "${gid}" ] || continue
+        id -G "${user}" 2>/dev/null | tr ' ' '\n' | grep -qx "${gid}" && continue
+        gname="$(getent group "${gid}" | cut -d: -f1)"
+        if [ -z "${gname}" ]; then
+            gname="gpu-${gid}"
+            groupadd -g "${gid}" "${gname}" 2>/dev/null || true
+        fi
+        [ -n "${gname}" ] && usermod -aG "${gname}" "${user}" 2>/dev/null \
+            && log "granted ${user} access to ${node} (gid ${gid} via group ${gname})"
+    done
+}
+
 # --- Steam Big Picture (steam image variant only) ---------------------------
 # The …-steam image bundles Steam + gamescope and a dedicated non-root "steam"
 # user (Steam will not run as root). We launch `gamescope -- steam -gamepadui`
@@ -415,6 +444,9 @@ start_steam() {
     command -v gamescope >/dev/null 2>&1 || { warn "Steam present but gamescope missing; not autostarting"; return 0; }
     id steam >/dev/null 2>&1 || { warn "no 'steam' user; not launching Steam"; return 0; }
     [ -n "${WAYLAND_DISPLAY:-}" ] || { warn "no Wayland session up; cannot launch Steam Big Picture"; return 0; }
+
+    # Ensure the steam user can actually open the GPU render node.
+    grant_gpu_access steam
 
     local uid runtime sockpath
     uid="$(id -u steam)"
@@ -474,6 +506,48 @@ seed_config() {
     fi
 }
 
+# --- sanitize the app list --------------------------------------------------
+# Hermes ships a default app list (copied to $APPS_JSON on first run) tailored to
+# a physical X11 desktop and a non-root Steam, neither of which fits this image:
+#   • "Low Res Desktop" runs `xrandr --output HDMI-1 ...` — fails on our headless
+#     Wayland session and aborts the stream.
+#   • "Steam Big Picture" runs `setsid steam steam://...` as the Hermes process
+#     user (root here); Steam refuses to run as root, so it silently no-ops.
+#   • "Gamescope Steam Session" runs `hermes-gamescope-launch`, which likewise
+#     starts Steam as root and cannot work here.
+# The -steam image already autostarts Steam in gamescope as the steam user, so
+# streaming "Desktop"/"Steam Big Picture" shows it. Strip the broken commands and
+# drop the gamescope-launch app in place, idempotently, so existing configs get
+# fixed too. Fresh configs get the cleaned /usr/share/hermes/apps.json template.
+sanitize_apps() {
+    [ -f "${APPS_JSON}" ] || return 0
+    grep -Eq 'xrandr|steam://|hermes-gamescope-launch' "${APPS_JSON}" 2>/dev/null || return 0
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; leaving apps.json unchanged"; return 0; }
+    local tmp; tmp="$(mktemp)"
+    if jq '
+          def clean:
+            ( if has("prep-cmd") then
+                .["prep-cmd"] = ( [ .["prep-cmd"][]
+                    | (.do //= "") | (.undo //= "")
+                    | select((.do | test("xrandr")) | not)
+                    | if (.undo | test("xrandr|steam://")) then .undo = "" else . end ]
+                  | map(select(.do != "" or .undo != "")) )
+              else . end )
+            | ( if has("detached") then
+                .detached = [ .detached[] | select(test("steam://") | not) ]
+              else . end )
+            | ( if (has("detached") and (.detached | length == 0)) then del(.detached) else . end )
+            | ( if (has("prep-cmd") and (.["prep-cmd"] | length == 0)) then del(.["prep-cmd"]) else . end );
+          .apps |= ( map(select((.cmd // "") != "hermes-gamescope-launch")) | map(clean) )
+        ' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+        cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
+        log "sanitized apps.json (removed xrandr / root steam:// / gamescope-launch commands)"
+    else
+        warn "could not sanitize apps.json (left unchanged)"
+    fi
+    rm -f "${tmp}"
+}
+
 # --- bring up the session ---------------------------------------------------
 start_dbus
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
@@ -498,6 +572,7 @@ else
 fi
 
 seed_config
+sanitize_apps
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"
 cd /config
