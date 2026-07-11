@@ -126,10 +126,17 @@ start_seat() {
     # wlroots' DRM backend needs a libseat session. This libseat build has no
     # "builtin" backend, so run seatd (works as root, no logind needed) and let
     # libseat talk to it over /run/seatd.sock.
+    #
+    # SEATD_VTBOUND=0 makes seatd create a seat that is NOT tied to a virtual
+    # terminal. A container has no VT (/dev/tty0), so the default VT-bound seat
+    # can never be activated — seatd logs "Could not open tty0" and the session
+    # stays inactive, making wlroots time out ("waiting session to become
+    # active"). A VT-free seat is activated immediately, so the DRM/KMS path can
+    # actually come up inside the container.
     if [ -S /run/seatd.sock ]; then
         return 0
     fi
-    seatd > /var/log/seatd.log 2>&1 &
+    SEATD_VTBOUND=0 seatd > /var/log/seatd.log 2>&1 &
     PIDS+=("$!")
     local _
     for _ in $(seq 1 40); do

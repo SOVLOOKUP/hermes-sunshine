@@ -76,13 +76,18 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
-> **Automatic headless fallback.** Driving the DRM output needs an _active_ seat
-> session, which requires a foreground virtual terminal — something most
-> container runtimes do not provide (sway then logs `Timeout waiting session to
-become active` / `Failed to start a DRM session`). When that happens the
-> entrypoint automatically retries on the wlroots **headless** backend so a
-> Wayland session always comes up and Hermes can capture. Set `HERMES_KMS=off`
-> to skip the KMS attempt and go straight to headless.
+> **Seat activation in a container.** Driving the DRM output needs an _active_
+> seat session, which a VT-bound seat can only get from a foreground virtual
+> terminal — absent in a container. The entrypoint therefore starts seatd with
+> `SEATD_VTBOUND=0`, creating a VT-free seat that activates immediately, so the
+> KMS path works without a `/dev/tty0`.
+>
+> **Automatic headless fallback.** If sway still fails to bring up a Wayland
+> socket on the DRM output (it logs `Timeout waiting session to become active` /
+> `Failed to start a DRM session`), the entrypoint automatically retries on the
+> wlroots **headless** backend, so a Wayland session always comes up and Hermes
+> can capture. Set `HERMES_KMS=off` to skip the KMS attempt and go straight to
+> headless.
 
 ## Quick start
 
@@ -237,10 +242,9 @@ initial_enabled=1`); it cannot be loaded from inside a container. sway (in the
   zero-copy from the `hermes_kms` render node. See
   [Virtual display](#virtual-display--hermes-kms).
 - **Headless fallback.** If no `hermes_kms` card is present, `HERMES_KMS=off`, or
-  the KMS DRM session cannot be activated (no foreground VT in the container),
-  the entrypoint starts sway with the wlroots **headless** backend so the web UI
-  and pairing still work. This software path is fine for testing but is not the
-  intended low-latency streaming path.
+  the KMS DRM session still fails to come up, the entrypoint starts sway with the
+  wlroots **headless** backend so the web UI and pairing still work. This
+  software path is fine for testing but is not the intended low-latency path.
 - **Real GPU still needed.** Hermes-KMS is not a render GPU — rendering and
   encoding run on a real GPU that imports the exported DMA-BUFs, so `/dev/dri`
   must be passed through.
