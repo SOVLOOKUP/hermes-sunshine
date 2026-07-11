@@ -65,19 +65,38 @@ RENDER_NODE=""       # real GPU render node used for rendering + encoding
 
 drm_driver() {
     # Print the kernel driver name for a /dev/dri/<node> (card* or renderD*).
-    basename "$(readlink -f "/sys/class/drm/$(basename "$1")/device/driver" 2>/dev/null)" 2>/dev/null || true
+    # Prefer the bound-driver symlink, then fall back to the uevent DRIVER=
+    # line — virtual DRM devices don't always expose the driver symlink.
+    local base sys drv
+    base="$(basename "$1")"
+    sys="/sys/class/drm/${base}/device"
+    drv="$(readlink -f "${sys}/driver" 2>/dev/null || true)"
+    drv="${drv##*/}"
+    if [ -z "${drv}" ]; then
+        drv="$(sed -n 's/^DRIVER=//p' "${sys}/uevent" 2>/dev/null | head -n1 || true)"
+    fi
+    printf '%s' "${drv}"
+}
+
+is_hermes_kms() {
+    # The DRM driver reports "hermes-kms" (hyphen) while the platform driver may
+    # use "hermes_kms" (underscore); match either, case-insensitively.
+    case "$(printf '%s' "${1:-}" | tr 'A-Z-' 'a-z_')" in
+        *hermes_kms*) return 0 ;;
+        *)            return 1 ;;
+    esac
 }
 
 detect_devices() {
-    local node
-    # The virtual display card is the DRM card whose driver is "hermes_kms".
-    # The HOST must have loaded hermes_kms.ko (initial_enabled=1) and passed
-    # /dev/dri into the container.
+    local node drv
+    # The virtual display card is the DRM card driven by the host hermes_kms.ko
+    # module (loaded with initial_enabled=1 and exposed via /dev/dri).
     for node in /dev/dri/card[0-9]*; do
         [ -e "${node}" ] || continue
-        if [ "$(drm_driver "${node}")" = "hermes_kms" ]; then
+        drv="$(drm_driver "${node}")"
+        log "DRM ${node}: driver=${drv:-unknown}"
+        if [ -z "${HERMES_KMS_CARD}" ] && is_hermes_kms "${drv}"; then
             HERMES_KMS_CARD="${node}"
-            break
         fi
     done
 
@@ -85,7 +104,7 @@ detect_devices() {
     # renderD* that is NOT provided by hermes_kms (which is not a render GPU).
     for node in /dev/dri/renderD*; do
         [ -e "${node}" ] || continue
-        [ "$(drm_driver "${node}")" = "hermes_kms" ] && continue
+        is_hermes_kms "$(drm_driver "${node}")" && continue
         RENDER_NODE="${node}"
         break
     done
@@ -99,6 +118,28 @@ detect_devices() {
         log "render/encode GPU node: ${RENDER_NODE}"
     else
         warn "no real render node — GPU rendering/encoding will not work."
+    fi
+}
+
+# --- seat management (needed by the DRM backend to open the GPU/KMS) --------
+start_seat() {
+    # wlroots' DRM backend needs a libseat session. This libseat build has no
+    # "builtin" backend, so run seatd (works as root, no logind needed) and let
+    # libseat talk to it over /run/seatd.sock.
+    if [ -S /run/seatd.sock ]; then
+        return 0
+    fi
+    seatd > /var/log/seatd.log 2>&1 &
+    PIDS+=("$!")
+    local _
+    for _ in $(seq 1 40); do
+        [ -S /run/seatd.sock ] && break
+        sleep 0.1
+    done
+    if [ -S /run/seatd.sock ]; then
+        log "seatd started"
+    else
+        warn "seatd did not create /run/seatd.sock; see /var/log/seatd.log"
     fi
 }
 
@@ -119,32 +160,40 @@ start_compositor() {
         *)   [ -n "${HERMES_KMS_CARD}" ] && use_kms="true" ;;
     esac
 
-    # libseat's "builtin" backend opens DRM/input directly as root, so no
-    # seatd/logind session is needed inside the container.
-    export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-builtin}"
     export XDG_SESSION_TYPE=wayland
     export XDG_CURRENT_DESKTOP=sway
 
     if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
         log "starting sway on the Hermes-KMS DRM output (${HERMES_KMS_CARD})"
+        # The DRM backend needs a libseat session; run seatd and use its backend.
+        start_seat
+        export LIBSEAT_BACKEND=seatd
         export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
         export WLR_RENDERER="${WLR_RENDERER:-gles2}"
         [ -n "${RENDER_NODE}" ] && \
             export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
-        unset WLR_BACKEND WLR_HEADLESS_OUTPUTS
+        export WLR_LIBINPUT_NO_DEVICES=1
+        unset WLR_BACKENDS WLR_HEADLESS_OUTPUTS
         sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
     else
         warn "falling back to the wlroots HEADLESS backend (software virtual display)."
         warn "For the low-latency KMS path, load hermes_kms.ko on the host and pass /dev/dri."
+        # The headless backend needs no seat/session. Render on the real GPU when
+        # one is present, else fall back to the pixman software renderer.
         if [ -n "${RENDER_NODE}" ]; then
             export WLR_RENDERER="${WLR_RENDERER:-gles2}"
+            export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
         else
             export WLR_RENDERER="${WLR_RENDERER:-pixman}"
         fi
-        WLR_BACKEND=headless \
-        WLR_LIBINPUT_NO_DEVICES=1 \
-        WLR_HEADLESS_OUTPUTS=1 \
-            sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
+        # NOTE: the backend selector is WLR_BACKENDS (plural). The singular form
+        # is silently ignored, which makes wlroots autodetect DRM and then fail
+        # for lack of a seat — the bug that kept the fallback from ever starting.
+        unset LIBSEAT_BACKEND WLR_DRM_DEVICES
+        export WLR_BACKENDS=headless
+        export WLR_LIBINPUT_NO_DEVICES=1
+        export WLR_HEADLESS_OUTPUTS=1
+        sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
     fi
     PIDS+=("$!")
 
@@ -169,6 +218,15 @@ start_compositor() {
     out="$(swaymsg -t get_outputs 2>/dev/null \
         | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
         | sed -E 's/.*"([^"]+)"$/\1/')"
+    if [ -z "${out}" ] && [ "${use_kms}" != "true" ]; then
+        # Some wlroots builds start the headless backend with zero outputs;
+        # create one explicitly so there is a surface to capture.
+        swaymsg create_output >/dev/null 2>&1 || true
+        sleep 0.3
+        out="$(swaymsg -t get_outputs 2>/dev/null \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')"
+    fi
     if [ -n "${out}" ]; then
         log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
         swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
@@ -190,8 +248,8 @@ start_pulse() {
     log "starting PulseAudio (system mode) with a virtual sink"
     pulseaudio --system --daemonize=true --disallow-exit=true \
         --exit-idle-time=-1 --log-target=stderr \
-        --realtime=false --high-priority=false 2>/dev/null \
-        || { warn "PulseAudio failed to start"; return 1; }
+        --realtime=false --high-priority=false 2>/var/log/pulse.log \
+        || { warn "PulseAudio failed to start (see /var/log/pulse.log)"; return 1; }
 
     export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
     for _ in $(seq 1 20); do

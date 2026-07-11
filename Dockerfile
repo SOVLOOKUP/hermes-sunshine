@@ -110,6 +110,17 @@ RUN pacman -Syu --noconfirm --needed curl \
     && pacman -Scc --noconfirm \
     && rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
+# The pulseaudio (system mode) and avahi daemons drop privileges to dedicated
+# system users that Arch normally creates via systemd-sysusers — which does not
+# run during an image build. Create them here so both daemons can start.
+RUN useradd --system --user-group --home-dir /var/run/pulse \
+    --shell /usr/bin/nologin --comment PulseAudio pulse 2>/dev/null || true; \
+    groupadd --system pulse-access 2>/dev/null || true; \
+    usermod -aG audio,pulse-access pulse 2>/dev/null || true; \
+    install -d -o pulse -g pulse /var/run/pulse /var/lib/pulse; \
+    useradd --system --user-group --home-dir / \
+    --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true
+
 # KMS/DRM capture path needs CAP_SYS_ADMIN; grant it as a file capability
 # (mirrors hermes.install do_setcap). Requires --cap-add=SYS_ADMIN at runtime.
 RUN setcap cap_sys_admin+p /usr/bin/hermes || true
