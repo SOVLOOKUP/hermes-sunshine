@@ -24,6 +24,13 @@ services:
       - SYS_ADMIN
     security_opt:
       - seccomp:unconfined
+      # AppArmor's default docker profile blocks the mount() calls that Steam's
+      # sandbox (pressure-vessel / bubblewrap) makes inside its own namespace —
+      # even with SYS_ADMIN it fails with "bwrap: Failed to make / slave:
+      # Permission denied" and Steam refuses to start. Only needed for the
+      # -steam image; harmless on the plain image. (User namespaces must also be
+      # enabled on the host — the norm on modern kernels; see README.)
+      - apparmor:unconfined
 
     devices:
       # Real GPU + the host Hermes-KMS virtual card (see README for host setup).

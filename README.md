@@ -237,6 +237,22 @@ How it works and what to know:
 - **Controllers.** Gamepad input arrives through the virtual `/dev/uinput` device
   (already mapped in the compose file) exactly like the streaming input path.
 
+> **Host prerequisite: user namespaces.** Steam's container runtime
+> (`pressure-vessel` / `bubblewrap`) creates a nested user + mount namespace and
+> remounts `/` inside it. Two host conditions must hold:
+>
+> 1. **User namespaces enabled** — check with
+>    `cat /proc/sys/user/max_user_namespaces` (must be non-zero; it is on modern
+>    kernels). On Ubuntu 24.04+ also ensure
+>    `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
+> 2. **AppArmor not blocking the sandbox mounts** — Docker's default profile
+>    denies the `mount()` calls `bwrap` makes even with `SYS_ADMIN`, so the
+>    compose file sets `security_opt: apparmor:unconfined` for this reason.
+>
+> Without both, Steam exits immediately (`rc=71`) logging `Steam now requires
+> user namespaces to be enabled` and `bwrap: Failed to make / slave: Permission
+> denied`.
+
 > **AMD-only graphics stack.** The bundled 32-bit drivers are `vulkan-radeon` /
 > `lib32-mesa` (AMD/Intel VAAPI + RADV). NVIDIA users need the NVIDIA Container
 > Toolkit and the matching 32-bit NVIDIA libraries, which are not baked in.
