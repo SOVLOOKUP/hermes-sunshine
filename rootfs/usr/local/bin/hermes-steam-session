@@ -14,8 +14,18 @@
 # it, so here we only compute the geometry and launch.
 set -euo pipefail
 
+# Mirror everything — our own messages plus gamescope/Steam output — to a stable
+# log. Hermes runs this as an app cmd, so without this the output would only land
+# in Hermes' own log; a fixed path makes each per-session launch easy to inspect.
+# Append (don't truncate) so a failed session survives the client reconnecting to
+# read it; a banner separates sessions.
+STEAM_LOG=/var/log/steam.log
+exec >>"${STEAM_LOG}" 2>&1
+
 log()  { printf '\033[0;36m[hermes-steam]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[0;33m[hermes-steam][warn]\033[0m %s\n' "$*" >&2; }
+
+log "=== session start $(date '+%F %T %Z') ==="
 
 command -v steam >/dev/null 2>&1     || { warn "steam not installed; nothing to launch"; exit 0; }
 command -v gamescope >/dev/null 2>&1 || { warn "gamescope not installed; nothing to launch"; exit 0; }
