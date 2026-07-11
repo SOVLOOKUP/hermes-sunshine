@@ -18,6 +18,20 @@ default_floating_border none
 seat * hide_cursor 5000
 focus_follows_mouse no
 
+# --- output layout ----------------------------------------------------------
+# Moonlight captures the Hermes-KMS "Virtual-1" connector, which is hotplugged
+# per stream. In the drm,headless multi-backend the placeholder "HEADLESS-1"
+# comes up first and would otherwise own workspace 1 and the focus, leaving the
+# streamed Virtual-1 on an empty secondary workspace — a black screen. Pin the
+# primary workspace to Virtual-1 (falling back to the placeholder only when it
+# is absent) and park the placeholder off to the side so new windows and the
+# cursor land on the output that is actually streamed. The solid background
+# makes an idle desktop show a visible colour instead of pure black.
+output "Virtual-1" position 0 0
+output "HEADLESS-1" position 7680 0
+workspace 1 output "Virtual-1" "HEADLESS-1"
+output * bg #202020 solid_color
+
 # Export the session environment to the user D-Bus + systemd (best effort).
 exec_always dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
 

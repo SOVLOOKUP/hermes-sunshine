@@ -5,6 +5,11 @@ services:
     # China users: swap the line above for the Nanjing University GHCR mirror to
     # pull much faster (uncomment this, comment the ghcr.io line above):
     # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
+    #
+    # Steam Big Picture: boot straight into Steam on the stream (see README).
+    # Use the parallel "-steam" tag instead of the lines above:
+    # image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
+    # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest-steam
 
     container_name: hermes
     restart: unless-stopped
@@ -45,6 +50,7 @@ services:
     #   START_PULSE: "true"
     #   START_AVAHI: "true"
     #   ENABLE_XWAYLAND: "true"  # X11 app compatibility
+    #   AUTOSTART_STEAM: "true"  # -steam image only: boot into Steam Big Picture
 
     # Explicit port mappings — use these ONLY when you cannot use host
     # networking (e.g. Docker Desktop). Comment out "network_mode: host" first.

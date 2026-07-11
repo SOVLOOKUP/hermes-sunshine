@@ -397,6 +397,54 @@ start_pulse() {
     fi
 }
 
+# --- Steam Big Picture (steam image variant only) ---------------------------
+# The …-steam image bundles Steam + gamescope and a dedicated non-root "steam"
+# user (Steam will not run as root). We launch `gamescope -- steam -gamepadui`
+# as that user, nested inside the root-owned sway session: gamescope is just a
+# Wayland client, so sway scans its window out to the streamed output. The
+# window opens on workspace 1, which our sway config pins to the captured
+# Virtual-1 output, so it follows the stream automatically.
+#
+# Cross-user socket sharing: sway's Wayland socket lives under the root-owned
+# XDG_RUNTIME_DIR (mode 700). Give the steam user traverse access to the dir and
+# rw on the socket, then hand it the socket by ABSOLUTE path so it can keep its
+# own private runtime dir (/run/user/1000).
+start_steam() {
+    command -v steam >/dev/null 2>&1 || return 0
+    [ "${AUTOSTART_STEAM:-true}" = "true" ] || { log "AUTOSTART_STEAM=false; not launching Steam"; return 0; }
+    command -v gamescope >/dev/null 2>&1 || { warn "Steam present but gamescope missing; not autostarting"; return 0; }
+    id steam >/dev/null 2>&1 || { warn "no 'steam' user; not launching Steam"; return 0; }
+    [ -n "${WAYLAND_DISPLAY:-}" ] || { warn "no Wayland session up; cannot launch Steam Big Picture"; return 0; }
+
+    local uid runtime sockpath
+    uid="$(id -u steam)"
+    runtime="/run/user/${uid}"
+    install -d -o steam -g steam -m 700 "${runtime}"
+    # Steam data (client bootstrap, library, config) persists in the /config
+    # volume via HOME so it survives container recreation.
+    install -d -o steam -g steam /config/steam
+
+    sockpath="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
+    chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+    chmod o+rw "${sockpath}" 2>/dev/null || true
+
+    # Fill the streamed output with the gamescope window (best effort; a single
+    # tiled window already fills the workspace when the rule doesn't match).
+    swaymsg 'for_window [app_id="gamescope"] fullscreen enable, border none' >/dev/null 2>&1 || true
+
+    local W="${DISPLAY_WIDTH:-1920}" H="${DISPLAY_HEIGHT:-1080}" R="${DISPLAY_REFRESH:-60}"
+    log "launching Steam Big Picture as user 'steam' (gamescope ${W}x${H}@${R})"
+    runuser -u steam -- env \
+        HOME=/config/steam \
+        XDG_RUNTIME_DIR="${runtime}" \
+        WAYLAND_DISPLAY="${sockpath}" \
+        PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" \
+        XDG_CURRENT_DESKTOP=gamescope \
+        gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- steam -gamepadui \
+        > /var/log/steam.log 2>&1 &
+    PIDS+=("$!")
+}
+
 # --- seed the required config keys ------------------------------------------
 # Hermes rewrites this file itself whenever you change settings in the web UI,
 # so merge idempotently: add each required key only when it is absent, and never
@@ -435,6 +483,10 @@ if [ "${START_COMPOSITOR}" = "true" ]; then
     start_compositor || warn "continuing without a Wayland session (capture will fail)"
 fi
 [ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; }
+
+# Steam Big Picture autostart (only fires on the …-steam image, where steam +
+# gamescope + the steam user exist). Needs the Wayland session and audio above.
+[ "${START_COMPOSITOR}" = "true" ] && { start_steam || warn "Steam autostart failed (see /var/log/steam.log)"; }
 
 # --- hardware encode diagnostics (non-fatal) --------------------------------
 if [ -d /dev/dri ]; then

@@ -129,6 +129,7 @@ _The PIN page_ of the web UI.
 | `HERMES_REPO`   | `MrOz59/Hermes`          | GitHub `owner/repo` to pull the release from.                                                    |
 | `HERMES_REF`    | `latest`                 | Release to install: `latest` or a specific tag (e.g. `v0.4.0`).                                  |
 | `USE_CN_MIRROR` | `true`                   | Use fast China mirrors (USTC + Tsinghua) for pacman. Set to `false` when building outside China. |
+| `INSTALL_STEAM` | `false`                  | Bundle Steam Big Picture + gamescope and a non-root `steam` user (the `-steam` image variant).   |
 
 > **Mirrors.** `USE_CN_MIRROR` defaults to `true` so local builds in China are
 > fast (USTC primary, Tsinghua secondary; the global CDN stays as fallback).
@@ -161,9 +162,18 @@ builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`):
 docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
 docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0   # pinned to a Hermes release
 
+# Steam Big Picture variant (see "Steam Big Picture" below):
+docker pull ghcr.io/sovlookup/hermes-sunshine:latest-steam
+docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0-steam
+
 # China: use the Nanjing University GHCR mirror for a faster pull
 docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
 ```
+
+Every build publishes **two parallel variants** from the same Dockerfile: the
+plain streaming host and a **`-steam`** flavour that also bundles Steam Big
+Picture (see below). The tags mirror each other, e.g. `latest` ↔ `latest-steam`
+and `hermes-<tag>` ↔ `hermes-<tag>-steam`.
 
 It runs on three triggers:
 
@@ -180,6 +190,50 @@ Each build pins the resolved `HERMES_REF`, so the image content always matches
 its `hermes-<tag>` tag. Runners are outside China, so the workflow passes
 `USE_CN_MIRROR=false` automatically.
 
+## Steam Big Picture
+
+The **`-steam`** image variant boots straight into **Steam Big Picture** on the
+streamed display — plug in a controller and it behaves like a console. It bundles
+Steam, [gamescope](https://github.com/ValveSoftware/gamescope), and the 32-bit
+AMD graphics stack on top of the normal streaming host.
+
+```bash
+docker compose up -d      # after switching the image tag to `latest-steam`
+```
+
+Point `docker-compose.yml` at the steam tag (the `image:` line has a
+commented-out alternative ready to uncomment):
+
+```yaml
+image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
+# China mirror:
+# image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest-steam
+```
+
+How it works and what to know:
+
+- **Autostart.** The entrypoint launches `gamescope … -- steam -gamepadui` as
+  soon as the Wayland session is up. gamescope is a nested Wayland client, so its
+  fullscreen window is scanned out to the captured `Virtual-1` output. Set
+  `AUTOSTART_STEAM=false` to boot to the plain desktop instead (e.g. to launch
+  Steam yourself, or use a different launcher).
+- **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
+  container runtime misbehaves and pollutes config ownership), so it runs as a
+  dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
+  and PulseAudio sockets are shared across to the `steam` user.
+- **Persistent library.** Steam's data (client bootstrap, login, installed games,
+  config) lives in `/config/steam`, so it survives container recreation. Games
+  can be large — make sure the `/config` volume has room, or bind-mount a bigger
+  disk there.
+- **Controllers.** Gamepad input arrives through the virtual `/dev/uinput` device
+  (already mapped in the compose file) exactly like the streaming input path.
+- **Resolution.** gamescope renders at `DISPLAY_WIDTH`×`DISPLAY_HEIGHT`@`DISPLAY_REFRESH`,
+  matching the streamed output.
+
+> **AMD-only graphics stack.** The bundled 32-bit drivers are `vulkan-radeon` /
+> `lib32-mesa` (AMD/Intel VAAPI + RADV). NVIDIA users need the NVIDIA Container
+> Toolkit and the matching 32-bit NVIDIA libraries, which are not baked in.
+
 ## Runtime environment variables
 
 | Variable           | Default                 | Description                                                                                                                     |
@@ -193,6 +247,7 @@ its `hermes-<tag>` tag. Runners are outside China, so the workflow passes
 | `START_PULSE`      | `true`                  | Start PulseAudio + virtual sink.                                                                                                |
 | `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                |
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                         |
+| `AUTOSTART_STEAM`  | `true`                  | On the `-steam` image, auto-launch Steam Big Picture (gamescope). No effect on the plain image.                                 |
 | `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                             |
 | `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                   |
 

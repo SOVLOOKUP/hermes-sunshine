@@ -134,6 +134,35 @@ RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# --- optional: Steam Big Picture variant ------------------------------------
+# Published as a parallel image tag (…-steam). When INSTALL_STEAM=true this
+# enables the [multilib] repo, installs Steam + gamescope and the 32-bit AMD
+# graphics stack, and creates a dedicated non-root "steam" user — Steam refuses
+# to run as root and its container runtime (pressure-vessel) misbehaves as root.
+# The entrypoint autostarts `gamescope -- steam -gamepadui` as that user when
+# Steam is present (toggle with AUTOSTART_STEAM). Declared last so the ARG only
+# invalidates this layer and the base image below still shares all cache above.
+# The `sed` uncomments the [multilib] block (a no-op if it is already enabled).
+ARG INSTALL_STEAM=false
+RUN if [ "${INSTALL_STEAM}" = "true" ]; then set -eu; \
+    sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf; \
+    pacman -Syu --noconfirm --needed \
+    steam \
+    gamescope \
+    vulkan-radeon lib32-vulkan-radeon \
+    lib32-mesa \
+    vulkan-icd-loader lib32-vulkan-icd-loader \
+    lib32-libva-mesa-driver \
+    lib32-libpulse; \
+    useradd --uid 1000 --user-group --create-home --home-dir /home/steam \
+    --shell /bin/bash steam; \
+    for g in video render audio input pulse-access seat; do \
+    getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
+    done; \
+    pacman -Scc --noconfirm; \
+    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*; \
+    fi
+
 # Sunshine/Moonlight ports:
 #   47984-47990/tcp : RTSP, control, web UI (47990)
 #   48010/tcp       : RTSP
