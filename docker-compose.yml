@@ -45,10 +45,23 @@ services:
       # Virtual gamepad / keyboard / mouse injection.
       - /dev/uinput:/dev/uinput
 
+    # The compositor reads the keyboard/mouse/gamepad Hermes injects via
+    # /dev/uinput back through libinput, which opens the resulting evdev nodes in
+    # /dev/input. Docker's /dev is a bare tmpfs (no /dev/input) and the device
+    # cgroup denies char-major-13 (the input class) by default, so we allow
+    # major 13 here and bind-mount the host's live /dev/input below. Without both
+    # the stream has picture + sound but no input.
+    device_cgroup_rules:
+      - 'c 13:* rmw'
+
     volumes:
       - ./config:/config
       # Follow the host timezone automatically (read-only).
       - /etc/localtime:/etc/localtime:ro
+      # Live view of the host input nodes (paired with device_cgroup_rules
+      # above): the evdev devices Hermes creates at stream time land on the host
+      # devtmpfs, and this bind lets the containerised compositor pick them up.
+      - /dev/input:/dev/input
     # ---- Advanced (optional) ------------------------------------------------
     # Everything below is optional; the image ships sensible defaults.
 

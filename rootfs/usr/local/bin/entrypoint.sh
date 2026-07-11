@@ -241,7 +241,14 @@ launch_sway() {
 setup_kms_env() {
     start_seat
     export LIBSEAT_BACKEND=seatd
-    export WLR_BACKENDS=drm,headless
+    # drm = the Hermes-KMS scanout, headless = the idle placeholder output (see
+    # above), libinput = the input backend. libinput is NOT autodetected once
+    # WLR_BACKENDS is set explicitly, so it must be listed or sway reads zero
+    # input devices (get_inputs == []) and the stream has video but no keyboard/
+    # mouse/gamepad — the uinput devices Hermes injects never reach the seat.
+    # WLR_LIBINPUT_NO_DEVICES=1 lets it start before any device exists (they are
+    # hotplugged when a client connects); it needs the same seatd session as DRM.
+    export WLR_BACKENDS=drm,headless,libinput
     export WLR_HEADLESS_OUTPUTS=1
     export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
     export WLR_RENDERER="${WLR_RENDERER:-gles2}"
@@ -463,9 +470,20 @@ prepare_steam() {
     chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
     chmod o+rw "${sockpath}" 2>/dev/null || true
 
-    # Fill the streamed output with the gamescope window (best effort; a single
-    # tiled window already fills the workspace when the rule doesn't match).
-    swaymsg 'for_window [app_id="gamescope"] fullscreen enable, border none' >/dev/null 2>&1 || true
+    # Pin the gamescope window to the output Hermes actually captures and
+    # fullscreen it there. On the KMS path sway runs a drm,headless multi-backend
+    # (see setup_kms_env): Hermes captures the per-session "Virtual-1" connector,
+    # but sway keeps focus on the idle "HEADLESS-1" placeholder, so a bare
+    # "fullscreen enable" fullscreens gamescope on the WRONG output and the
+    # captured one stays black. Route it to Virtual-1 by name (the rule fires
+    # when the window maps, after Hermes has hotplugged the connector) and focus
+    # it so input lands there too. On the headless fallback there is only one
+    # output, so no move is needed.
+    if [ "${KMS_ZEROCOPY}" = "true" ]; then
+        swaymsg 'for_window [app_id="gamescope"] move container to output Virtual-1, fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+    else
+        swaymsg 'for_window [app_id="gamescope"] fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+    fi
 
     log "Steam Big Picture ready as a per-session app (launches at the client's resolution when streamed)"
 }
