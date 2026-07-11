@@ -170,6 +170,15 @@ launch_sway() {
     if [ -n "${sock}" ] && kill -0 "${pid}" 2>/dev/null; then
         PIDS+=("${pid}")
         export WAYLAND_DISPLAY="$(basename "${sock}")"
+        # swaymsg locates sway's IPC socket via SWAYSOCK; sway only exports it to
+        # its own children, so publish it here (it appears alongside the Wayland
+        # socket) — without it swaymsg cannot query/set outputs.
+        for _ in $(seq 1 20); do
+            SWAYSOCK="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'sway-ipc.*.sock' 2>/dev/null | head -n1 || true)"
+            [ -n "${SWAYSOCK}" ] && break
+            sleep 0.1
+        done
+        [ -n "${SWAYSOCK}" ] && export SWAYSOCK
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
