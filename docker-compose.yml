@@ -23,14 +23,21 @@ services:
     cap_add:
       - SYS_ADMIN
     security_opt:
-      - seccomp:unconfined
-      # AppArmor's default docker profile blocks the mount() calls that Steam's
-      # sandbox (pressure-vessel / bubblewrap) makes inside its own namespace —
-      # even with SYS_ADMIN it fails with "bwrap: Failed to make / slave:
-      # Permission denied" and Steam refuses to start. Only needed for the
-      # -steam image; harmless on the plain image. (User namespaces must also be
-      # enabled on the host — the norm on modern kernels; see README.)
-      - apparmor:unconfined
+      - seccomp=unconfined
+      # Steam's sandbox (pressure-vessel / bubblewrap) creates a nested mount
+      # namespace and does `mount --make-rslave /` inside it. That recursive
+      # remount also touches the read-only / masked system paths runc locks into
+      # a default container (/proc/kcore, /sys/firmware, …), which can't be
+      # re-propagated even with SYS_ADMIN — bwrap dies with "Failed to make /
+      # slave: Permission denied" (rc=71). systempaths=unconfined drops those
+      # locked mounts so the recursive rslave succeeds. Only needed for the
+      # -steam image; harmless on the plain image.
+      - systempaths=unconfined
+      # On hosts where AppArmor is loaded (Ubuntu/Debian), its default docker
+      # profile also denies those same mount() calls. Unconfining is a no-op
+      # where AppArmor isn't loaded (e.g. Arch/CachyOS). (User namespaces must
+      # also be enabled on the host — the norm on modern kernels; see README.)
+      - apparmor=unconfined
 
     devices:
       # Real GPU + the host Hermes-KMS virtual card (see README for host setup).

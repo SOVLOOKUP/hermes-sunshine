@@ -239,17 +239,21 @@ How it works and what to know:
 
 > **Host prerequisite: user namespaces.** Steam's container runtime
 > (`pressure-vessel` / `bubblewrap`) creates a nested user + mount namespace and
-> remounts `/` inside it. Two host conditions must hold:
+> recursively remounts `/` (`mount --make-rslave /`) inside it. Two host
+> conditions must hold:
 >
 > 1. **User namespaces enabled** — check with
 >    `cat /proc/sys/user/max_user_namespaces` (must be non-zero; it is on modern
 >    kernels). On Ubuntu 24.04+ also ensure
 >    `sysctl kernel.apparmor_restrict_unprivileged_userns=0`.
-> 2. **AppArmor not blocking the sandbox mounts** — Docker's default profile
->    denies the `mount()` calls `bwrap` makes even with `SYS_ADMIN`, so the
->    compose file sets `security_opt: apparmor:unconfined` for this reason.
+> 2. **The recursive remount must be allowed** — a default container locks its
+>    masked/read-only system paths (`/proc/kcore`, `/sys/firmware`, …) so the
+>    recursive `--make-rslave` fails on them even with `SYS_ADMIN`. The compose
+>    file therefore sets `security_opt: systempaths=unconfined` (drops those
+>    locked mounts) and `apparmor:unconfined` (Docker's default AppArmor profile
+>    denies the same mounts on hosts where AppArmor is loaded).
 >
-> Without both, Steam exits immediately (`rc=71`) logging `Steam now requires
+> Without these, Steam exits immediately (`rc=71`) logging `Steam now requires
 > user namespaces to be enabled` and `bwrap: Failed to make / slave: Permission
 > denied`.
 
