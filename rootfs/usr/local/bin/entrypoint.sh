@@ -466,15 +466,45 @@ start_steam() {
 
     local W="${DISPLAY_WIDTH:-1920}" H="${DISPLAY_HEIGHT:-1080}" R="${DISPLAY_REFRESH:-60}"
     log "launching Steam Big Picture as user 'steam' (gamescope ${W}x${H}@${R})"
-    runuser -u steam -- env \
-        HOME=/config/steam \
-        XDG_RUNTIME_DIR="${runtime}" \
-        WAYLAND_DISPLAY="${sockpath}" \
-        PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" \
-        XDG_CURRENT_DESKTOP=gamescope \
-        gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- steam -gamepadui \
-        > /var/log/steam.log 2>&1 &
+    log "Steam's first run only bootstraps its client and exits; the supervisor"
+    log "relaunches it, so the initial update/login can take a few minutes."
+    # Supervise, don't fire-and-forget: gamescope's primary child is Steam, so
+    # when Steam exits — which it does on the very first run, right after
+    # bootstrapping its client ("Setting up Steam content") — gamescope tears
+    # down and the streamed output goes black. Keep a background relaunch loop
+    # (the SteamOS "Restart=always" session model) so the next run updates and
+    # lands in Big Picture. Track the loop's PID so cleanup() can stop it.
+    steam_supervisor "${runtime}" "${sockpath}" "${W}" "${H}" "${R}" &
     PIDS+=("$!")
+}
+
+# Relaunch the gamescope+Steam session whenever it exits (see start_steam). Runs
+# as a tracked background subshell; on shutdown it forwards the signal to the
+# live gamescope child and stops looping. `wait` failures are swallowed so the
+# script-wide `set -e` does not kill the loop when Steam exits non-zero, and the
+# inherited EXIT trap is cleared so cleanup() only runs from the main shell.
+steam_supervisor() {
+    local runtime="$1" sockpath="$2" W="$3" H="$4" R="$5"
+    local child="" rc=0
+    trap - EXIT
+    trap 'kill "${child}" 2>/dev/null || true; exit 0' TERM INT
+    while :; do
+        runuser -u steam -- env \
+            HOME=/config/steam \
+            XDG_RUNTIME_DIR="${runtime}" \
+            WAYLAND_DISPLAY="${sockpath}" \
+            PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" \
+            XDG_CURRENT_DESKTOP=gamescope \
+            gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- steam -gamepadui \
+            >> /var/log/steam.log 2>&1 &
+        child="$!"
+        rc=0
+        wait "${child}" || rc=$?
+        child=""
+        printf '[hermes] Steam/gamescope session exited (rc=%s); relaunching in 3s\n' \
+            "${rc}" >> /var/log/steam.log 2>&1
+        sleep 3
+    done
 }
 
 # --- seed the required config keys ------------------------------------------
