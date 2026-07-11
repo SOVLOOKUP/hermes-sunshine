@@ -133,15 +133,16 @@ RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 
 # Runtime configs + entrypoint.
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session
 
 # --- optional: Steam Big Picture variant ------------------------------------
 # Published as a parallel image tag (…-steam). When INSTALL_STEAM=true this
 # enables the [multilib] repo, installs Steam + gamescope and the 32-bit AMD
 # graphics stack, and creates a dedicated non-root "steam" user — Steam refuses
 # to run as root and its container runtime (pressure-vessel) misbehaves as root.
-# The entrypoint autostarts `gamescope -- steam -gamepadui` as that user when
-# Steam is present (toggle with AUTOSTART_STEAM). Declared last so the ARG only
+# The entrypoint registers "Steam Big Picture" as a per-session Hermes app: when
+# a client streams it, Hermes runs the launcher at the client's negotiated
+# resolution (toggle with AUTOSTART_STEAM). Declared last so the ARG only
 # invalidates this layer and the base image below still shares all cache above.
 # The `sed` uncomments the [multilib] block (a no-op if it is already enabled).
 ARG INSTALL_STEAM=false

@@ -28,10 +28,11 @@ Sunshine. Clients: **Moonlight**, **Artemis**, or **Hestia**.
 ## Contents
 
 ```
-Dockerfile                          single-stage build (download + install pkg)
-docker-compose.yml                  ready-to-run service definition
-rootfs/usr/local/bin/entrypoint.sh  session bring-up + launch
-rootfs/etc/sway/config              Wayland session template
+Dockerfile                                single-stage build (download + install pkg)
+docker-compose.yml                        ready-to-run service definition
+rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch
+rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher (-steam)
+rootfs/etc/sway/config                    Wayland session template
 ```
 
 ## Requirements
@@ -212,11 +213,19 @@ image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
 
 How it works and what to know:
 
-- **Autostart.** The entrypoint launches `gamescope … -- steam -gamepadui` as
-  soon as the Wayland session is up. gamescope is a nested Wayland client, so its
-  fullscreen window is scanned out to the captured `Virtual-1` output. Set
-  `AUTOSTART_STEAM=false` to boot to the plain desktop instead (e.g. to launch
-  Steam yourself, or use a different launcher).
+- **Per-session launch (native resolution).** "Steam Big Picture" is registered
+  as a Hermes app, not a boot-time autostart. When a client streams it, Hermes
+  runs `gamescope … -- steam -gamepadui` at the stream's **negotiated
+  resolution/refresh** (`SUNSHINE_CLIENT_WIDTH`/`HEIGHT`/`FPS`), so the picture
+  is rendered natively for whatever the Moonlight client asked for — no
+  upscaling. gamescope is a nested Wayland client, so its fullscreen window is
+  scanned out to the captured `Virtual-1` output. When the client disconnects
+  Hermes tears the session down, so Steam is **relaunched fresh per connection**
+  (it is not kept warm). Set `AUTOSTART_STEAM=false` to leave the app
+  unregistered and boot to the plain desktop instead.
+- **First run is slower.** Because Steam starts fresh each connection, the very
+  first stream re-runs Steam's bootstrap ("Setting up Steam content"). That data
+  lives in `/config/steam` (below), so every subsequent connection comes up fast.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
@@ -227,8 +236,6 @@ How it works and what to know:
   disk there.
 - **Controllers.** Gamepad input arrives through the virtual `/dev/uinput` device
   (already mapped in the compose file) exactly like the streaming input path.
-- **Resolution.** gamescope renders at `DISPLAY_WIDTH`×`DISPLAY_HEIGHT`@`DISPLAY_REFRESH`,
-  matching the streamed output.
 
 > **AMD-only graphics stack.** The bundled 32-bit drivers are `vulkan-radeon` /
 > `lib32-mesa` (AMD/Intel VAAPI + RADV). NVIDIA users need the NVIDIA Container
@@ -236,20 +243,20 @@ How it works and what to know:
 
 ## Runtime environment variables
 
-| Variable           | Default                 | Description                                                                                                                     |
-| ------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `TZ`               | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override. |
-| `HERMES_KMS`       | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                         |
-| `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                           |
-| `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                          |
-| `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                               |
-| `START_COMPOSITOR` | `true`                  | Start the Wayland (sway) session.                                                                                               |
-| `START_PULSE`      | `true`                  | Start PulseAudio + virtual sink.                                                                                                |
-| `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                |
-| `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                         |
-| `AUTOSTART_STEAM`  | `true`                  | On the `-steam` image, auto-launch Steam Big Picture (gamescope). No effect on the plain image.                                 |
-| `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                             |
-| `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                   |
+| Variable           | Default                 | Description                                                                                                                                                                                     |
+| ------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TZ`               | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                                 |
+| `HERMES_KMS`       | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                                         |
+| `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                                                                                           |
+| `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                                          |
+| `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                                               |
+| `START_COMPOSITOR` | `true`                  | Start the Wayland (sway) session.                                                                                                                                                               |
+| `START_PULSE`      | `true`                  | Start PulseAudio + virtual sink.                                                                                                                                                                |
+| `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                                |
+| `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                                         |
+| `AUTOSTART_STEAM`  | `true`                  | On the `-steam` image, register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered. No effect on the plain image. |
+| `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                                             |
+| `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                                                                                   |
 
 The virtual output resolution is set at runtime from `DISPLAY_WIDTH`/`HEIGHT`/
 `REFRESH`. Drop extra sway snippets into `./config/sway.d/*.conf` on the host to

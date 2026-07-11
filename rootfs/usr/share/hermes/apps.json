@@ -11,7 +11,8 @@
     {
       "name": "Steam Big Picture",
       "image-path": "steam.png",
-      "allow-client-commands": false
+      "allow-client-commands": false,
+      "cmd": "/usr/local/bin/hermes-steam-session"
     }
   ]
 }

@@ -8,6 +8,7 @@ warn() { printf '\033[0;33m[hermes][warn]\033[0m %s\n' "$*" >&2; }
 
 HERMES_CONFIG="${HERMES_CONFIG:-/config/sunshine.conf}"
 APPS_JSON="${APPS_JSON:-/config/.config/sunshine/apps.json}"
+STEAM_SESSION_CMD="/usr/local/bin/hermes-steam-session"
 SWAY_TEMPLATE="/etc/sway/config"
 SWAY_CONFIG="/run/hermes/sway.config"
 PIDS=()
@@ -426,24 +427,26 @@ grant_gpu_access() {
     done
 }
 
-# --- Steam Big Picture (steam image variant only) ---------------------------
-# The …-steam image bundles Steam + gamescope and a dedicated non-root "steam"
-# user (Steam will not run as root). We launch `gamescope -- steam -gamepadui`
-# as that user, nested inside the root-owned sway session: gamescope is just a
-# Wayland client, so sway scans its window out to the streamed output. The
-# window opens on workspace 1, which our sway config pins to the captured
-# Virtual-1 output, so it follows the stream automatically.
+# --- Steam Big Picture (…-steam image variant only) -------------------------
+# Steam is NOT autostarted. It is registered as a per-session Hermes app: when a
+# client streams "Steam Big Picture", Hermes runs ${STEAM_SESSION_CMD} at the
+# client's negotiated resolution (native, no upscaling) as the non-root "steam"
+# user (Steam refuses to run as root). gamescope is a nested Wayland client of
+# the root-owned sway session, so its fullscreen window is scanned out to the
+# captured Virtual-1 output. When the client disconnects Hermes tears the app
+# down, so Steam is relaunched fresh per connection (its data persists under
+# /config/steam, so only the very first bootstrap is slow).
 #
-# Cross-user socket sharing: sway's Wayland socket lives under the root-owned
-# XDG_RUNTIME_DIR (mode 700). Give the steam user traverse access to the dir and
-# rw on the socket, then hand it the socket by ABSOLUTE path so it can keep its
-# own private runtime dir (/run/user/1000).
-start_steam() {
+# This one-time boot step does the root-side setup the per-session launcher
+# relies on: grant the steam user GPU access, create its runtime dir, and hand
+# it traverse+rw on the root-owned sway Wayland socket (mode 700 dir) by absolute
+# path, plus install the sway rule that fullscreens the gamescope window.
+prepare_steam() {
     command -v steam >/dev/null 2>&1 || return 0
-    [ "${AUTOSTART_STEAM:-true}" = "true" ] || { log "AUTOSTART_STEAM=false; not launching Steam"; return 0; }
-    command -v gamescope >/dev/null 2>&1 || { warn "Steam present but gamescope missing; not autostarting"; return 0; }
-    id steam >/dev/null 2>&1 || { warn "no 'steam' user; not launching Steam"; return 0; }
-    [ -n "${WAYLAND_DISPLAY:-}" ] || { warn "no Wayland session up; cannot launch Steam Big Picture"; return 0; }
+    [ "${AUTOSTART_STEAM:-true}" = "true" ] || { log "AUTOSTART_STEAM=false; skipping Steam prep (streamed app shows the desktop)"; return 0; }
+    command -v gamescope >/dev/null 2>&1 || { warn "Steam present but gamescope missing; Steam app disabled"; return 0; }
+    id steam >/dev/null 2>&1 || { warn "no 'steam' user; Steam app disabled"; return 0; }
+    [ -n "${WAYLAND_DISPLAY:-}" ] || { warn "no Wayland session up; Steam app will not work"; return 0; }
 
     # Ensure the steam user can actually open the GPU render node.
     grant_gpu_access steam
@@ -464,47 +467,7 @@ start_steam() {
     # tiled window already fills the workspace when the rule doesn't match).
     swaymsg 'for_window [app_id="gamescope"] fullscreen enable, border none' >/dev/null 2>&1 || true
 
-    local W="${DISPLAY_WIDTH:-1920}" H="${DISPLAY_HEIGHT:-1080}" R="${DISPLAY_REFRESH:-60}"
-    log "launching Steam Big Picture as user 'steam' (gamescope ${W}x${H}@${R})"
-    log "Steam's first run only bootstraps its client and exits; the supervisor"
-    log "relaunches it, so the initial update/login can take a few minutes."
-    # Supervise, don't fire-and-forget: gamescope's primary child is Steam, so
-    # when Steam exits — which it does on the very first run, right after
-    # bootstrapping its client ("Setting up Steam content") — gamescope tears
-    # down and the streamed output goes black. Keep a background relaunch loop
-    # (the SteamOS "Restart=always" session model) so the next run updates and
-    # lands in Big Picture. Track the loop's PID so cleanup() can stop it.
-    steam_supervisor "${runtime}" "${sockpath}" "${W}" "${H}" "${R}" &
-    PIDS+=("$!")
-}
-
-# Relaunch the gamescope+Steam session whenever it exits (see start_steam). Runs
-# as a tracked background subshell; on shutdown it forwards the signal to the
-# live gamescope child and stops looping. `wait` failures are swallowed so the
-# script-wide `set -e` does not kill the loop when Steam exits non-zero, and the
-# inherited EXIT trap is cleared so cleanup() only runs from the main shell.
-steam_supervisor() {
-    local runtime="$1" sockpath="$2" W="$3" H="$4" R="$5"
-    local child="" rc=0
-    trap - EXIT
-    trap 'kill "${child}" 2>/dev/null || true; exit 0' TERM INT
-    while :; do
-        runuser -u steam -- env \
-            HOME=/config/steam \
-            XDG_RUNTIME_DIR="${runtime}" \
-            WAYLAND_DISPLAY="${sockpath}" \
-            PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" \
-            XDG_CURRENT_DESKTOP=gamescope \
-            gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- steam -gamepadui \
-            >> /var/log/steam.log 2>&1 &
-        child="$!"
-        rc=0
-        wait "${child}" || rc=$?
-        child=""
-        printf '[hermes] Steam/gamescope session exited (rc=%s); relaunching in 3s\n' \
-            "${rc}" >> /var/log/steam.log 2>&1
-        sleep 3
-    done
+    log "Steam Big Picture ready as a per-session app (launches at the client's resolution when streamed)"
 }
 
 # --- seed the required config keys ------------------------------------------
@@ -545,8 +508,9 @@ seed_config() {
 #     user (root here); Steam refuses to run as root, so it silently no-ops.
 #   • "Gamescope Steam Session" runs `hermes-gamescope-launch`, which likewise
 #     starts Steam as root and cannot work here.
-# The -steam image already autostarts Steam in gamescope as the steam user, so
-# streaming "Desktop"/"Steam Big Picture" shows it. Strip the broken commands and
+# On the -steam image we instead register our own per-session launcher as the
+# "Steam Big Picture" cmd (see configure_steam_app), so streaming that app brings
+# Steam up correctly at the client's resolution. Strip the broken commands and
 # drop the gamescope-launch app in place, idempotently, so existing configs get
 # fixed too. Fresh configs get the cleaned /usr/share/hermes/apps.json template.
 sanitize_apps() {
@@ -578,6 +542,41 @@ sanitize_apps() {
     rm -f "${tmp}"
 }
 
+# --- register the per-session Steam launcher --------------------------------
+# On the -steam image, point the "Steam Big Picture" app's cmd at our per-session
+# launcher so Hermes runs it (at the client's negotiated resolution) when the app
+# is streamed. Fresh /config volumes already carry this in the apps.json template;
+# this patches an existing /config idempotently — updating the cmd, or appending
+# the app when it is missing. Only touches the file when steam + gamescope exist.
+configure_steam_app() {
+    command -v steam >/dev/null 2>&1 || return 0
+    command -v gamescope >/dev/null 2>&1 || return 0
+    [ -f "${APPS_JSON}" ] || return 0
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot register the Steam app"; return 0; }
+    # Already wired to the launcher? nothing to do.
+    jq -e --arg cmd "${STEAM_SESSION_CMD}" \
+        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd)' \
+        "${APPS_JSON}" >/dev/null 2>&1 && return 0
+    local tmp; tmp="$(mktemp)"
+    if jq --arg cmd "${STEAM_SESSION_CMD}" '
+          if any(.apps[]?; .name == "Steam Big Picture")
+          then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd else . end)
+          else .apps += [{
+              "name": "Steam Big Picture",
+              "image-path": "steam.png",
+              "allow-client-commands": false,
+              "cmd": $cmd
+          }]
+          end
+        ' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+        cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
+        log "registered Steam Big Picture as a per-session app (cmd=${STEAM_SESSION_CMD})"
+    else
+        warn "could not register the Steam app in apps.json (left unchanged)"
+    fi
+    rm -f "${tmp}"
+}
+
 # --- bring up the session ---------------------------------------------------
 start_dbus
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
@@ -588,9 +587,11 @@ if [ "${START_COMPOSITOR}" = "true" ]; then
 fi
 [ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; }
 
-# Steam Big Picture autostart (only fires on the …-steam image, where steam +
-# gamescope + the steam user exist). Needs the Wayland session and audio above.
-[ "${START_COMPOSITOR}" = "true" ] && { start_steam || warn "Steam autostart failed (see /var/log/steam.log)"; }
+# Steam Big Picture per-session prep (only does anything on the …-steam image,
+# where steam + gamescope + the steam user exist). Needs the Wayland session and
+# audio above. This does NOT start Steam — it just readies the steam user so the
+# per-session launcher (run by Hermes when the app is streamed) works.
+[ "${START_COMPOSITOR}" = "true" ] && { prepare_steam || warn "Steam prep failed (see /var/log/steam.log)"; }
 
 # --- hardware encode diagnostics (non-fatal) --------------------------------
 if [ -d /dev/dri ]; then
@@ -603,6 +604,7 @@ fi
 
 seed_config
 sanitize_apps
+configure_steam_app
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"
 cd /config

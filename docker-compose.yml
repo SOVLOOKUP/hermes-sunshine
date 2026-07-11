@@ -6,8 +6,8 @@ services:
     # pull much faster (uncomment this, comment the ghcr.io line above):
     # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
     #
-    # Steam Big Picture: boot straight into Steam on the stream (see README).
-    # Use the parallel "-steam" tag instead of the lines above:
+    # Steam Big Picture: stream the "Steam Big Picture" app to launch Steam at
+    # the client's resolution (see README). Use the parallel "-steam" tag:
     # image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
     # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest-steam
 
@@ -35,7 +35,6 @@ services:
       - ./config:/config
       # Follow the host timezone automatically (read-only).
       - /etc/localtime:/etc/localtime:ro
-
     # ---- Advanced (optional) ------------------------------------------------
     # Everything below is optional; the image ships sensible defaults.
 
@@ -50,7 +49,7 @@ services:
     #   START_PULSE: "true"
     #   START_AVAHI: "true"
     #   ENABLE_XWAYLAND: "true"  # X11 app compatibility
-    #   AUTOSTART_STEAM: "true"  # -steam image only: boot into Steam Big Picture
+    #   AUTOSTART_STEAM: "true"  # -steam image only: register Steam Big Picture app
 
     # Explicit port mappings — use these ONLY when you cannot use host
     # networking (e.g. Docker Desktop). Comment out "network_mode: host" first.
