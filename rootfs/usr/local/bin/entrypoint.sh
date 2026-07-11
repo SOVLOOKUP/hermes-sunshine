@@ -143,7 +143,62 @@ start_seat() {
     fi
 }
 
-# --- Wayland compositor (sway) on the Hermes-KMS output ---------------------
+# --- Wayland compositor (sway): KMS output with headless fallback -----------
+
+# Start sway in the background with the currently exported WLR_* environment and
+# wait for it to publish a Wayland socket. On success records the PID, exports
+# WAYLAND_DISPLAY and returns 0; otherwise kills the failed instance and returns
+# 1. wlroots gives up within ~10s when it cannot bring up a backend (e.g. the
+# DRM session never becomes active in a container with no foreground VT), so we
+# watch the process while polling — no point waiting once it has exited.
+launch_sway() {
+    sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
+    local pid=$! sock="" _
+    for _ in $(seq 1 60); do
+        kill -0 "${pid}" 2>/dev/null || break
+        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' 2>/dev/null | head -n1 || true)"
+        [ -n "${sock}" ] && break
+        sleep 0.25
+    done
+    if [ -n "${sock}" ] && kill -0 "${pid}" 2>/dev/null; then
+        PIDS+=("${pid}")
+        export WAYLAND_DISPLAY="$(basename "${sock}")"
+        return 0
+    fi
+    kill "${pid}" 2>/dev/null || true
+    return 1
+}
+
+# Environment for the DRM (KMS) backend: drive the Hermes-KMS card, render on the
+# real GPU, and open the device through a seatd session.
+setup_kms_env() {
+    start_seat
+    export LIBSEAT_BACKEND=seatd
+    export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
+    export WLR_RENDERER="${WLR_RENDERER:-gles2}"
+    [ -n "${RENDER_NODE}" ] && \
+        export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
+    export WLR_LIBINPUT_NO_DEVICES=1
+    unset WLR_BACKENDS WLR_HEADLESS_OUTPUTS
+}
+
+# Environment for the headless backend: a software/GPU-rendered virtual output
+# that needs no seat or session — the reliable path inside a container. NOTE:
+# the backend selector is WLR_BACKENDS (plural); the singular form is silently
+# ignored, which makes wlroots autodetect DRM and fail for lack of a seat.
+setup_headless_env() {
+    unset LIBSEAT_BACKEND WLR_DRM_DEVICES
+    export WLR_BACKENDS=headless
+    export WLR_HEADLESS_OUTPUTS=1
+    export WLR_LIBINPUT_NO_DEVICES=1
+    if [ -n "${RENDER_NODE}" ]; then
+        export WLR_RENDERER=gles2
+        export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
+    else
+        export WLR_RENDERER=pixman
+    fi
+}
+
 start_compositor() {
     # Build the effective sway config from the template (resolution is applied
     # afterwards via swaymsg, since the output name depends on the backend).
@@ -151,8 +206,7 @@ start_compositor() {
     [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
     sed -e "s/__XWAYLAND__/${xw}/g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
 
-    # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless
-    # backend (software output) when the module/device is absent.
+    # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless backend.
     local use_kms="false"
     case "${HERMES_KMS:-auto}" in
         on)  use_kms="true" ;;
@@ -163,62 +217,45 @@ start_compositor() {
     export XDG_SESSION_TYPE=wayland
     export XDG_CURRENT_DESKTOP=sway
 
+    local started="false"
     if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
         log "starting sway on the Hermes-KMS DRM output (${HERMES_KMS_CARD})"
-        # The DRM backend needs a libseat session; run seatd and use its backend.
-        start_seat
-        export LIBSEAT_BACKEND=seatd
-        export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
-        export WLR_RENDERER="${WLR_RENDERER:-gles2}"
-        [ -n "${RENDER_NODE}" ] && \
-            export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
-        export WLR_LIBINPUT_NO_DEVICES=1
-        unset WLR_BACKENDS WLR_HEADLESS_OUTPUTS
-        sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
-    else
-        warn "falling back to the wlroots HEADLESS backend (software virtual display)."
-        warn "For the low-latency KMS path, load hermes_kms.ko on the host and pass /dev/dri."
-        # The headless backend needs no seat/session. Render on the real GPU when
-        # one is present, else fall back to the pixman software renderer.
-        if [ -n "${RENDER_NODE}" ]; then
-            export WLR_RENDERER="${WLR_RENDERER:-gles2}"
-            export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
+        setup_kms_env
+        if launch_sway; then
+            started="true"
+            log "Wayland session up on the Hermes-KMS output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
         else
-            export WLR_RENDERER="${WLR_RENDERER:-pixman}"
+            warn "sway could not start on the Hermes-KMS DRM output; see /var/log/sway.log"
+            tail -n 20 /var/log/sway.log >&2 || true
+            warn "the container has no active DRM session (a seat cannot be activated"
+            warn "without a foreground VT); falling back to the wlroots headless backend."
         fi
-        # NOTE: the backend selector is WLR_BACKENDS (plural). The singular form
-        # is silently ignored, which makes wlroots autodetect DRM and then fail
-        # for lack of a seat — the bug that kept the fallback from ever starting.
-        unset LIBSEAT_BACKEND WLR_DRM_DEVICES
-        export WLR_BACKENDS=headless
-        export WLR_LIBINPUT_NO_DEVICES=1
-        export WLR_HEADLESS_OUTPUTS=1
-        sway -c "${SWAY_CONFIG}" > /var/log/sway.log 2>&1 &
     fi
-    PIDS+=("$!")
 
-    # Wait for the Wayland socket to appear.
-    local sock=""
-    for _ in $(seq 1 40); do
-        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' 2>/dev/null | head -n1 || true)"
-        [ -n "${sock}" ] && break
-        sleep 0.25
-    done
-    if [ -z "${sock}" ]; then
+    if [ "${started}" != "true" ]; then
+        if [ "${use_kms}" != "true" ]; then
+            warn "using the wlroots HEADLESS backend (software virtual display)."
+            warn "For the low-latency KMS path, load hermes_kms.ko on the host and pass /dev/dri."
+        fi
+        setup_headless_env
+        if launch_sway; then
+            started="true"
+            log "Wayland session up on a headless output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
+        fi
+    fi
+
+    if [ "${started}" != "true" ]; then
         warn "sway did not create a Wayland socket; see /var/log/sway.log"
         tail -n 40 /var/log/sway.log >&2 || true
         return 1
     fi
-    export WAYLAND_DISPLAY="$(basename "${sock}")"
-    export XDG_SESSION_TYPE=wayland
-    log "Wayland session up on WAYLAND_DISPLAY=${WAYLAND_DISPLAY}"
 
     # Apply the requested mode on whatever output the backend created.
     local out
     out="$(swaymsg -t get_outputs 2>/dev/null \
         | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
         | sed -E 's/.*"([^"]+)"$/\1/')"
-    if [ -z "${out}" ] && [ "${use_kms}" != "true" ]; then
+    if [ -z "${out}" ]; then
         # Some wlroots builds start the headless backend with zero outputs;
         # create one explicitly so there is a surface to capture.
         swaymsg create_output >/dev/null 2>&1 || true

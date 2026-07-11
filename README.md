@@ -76,6 +76,14 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
+> **Automatic headless fallback.** Driving the DRM output needs an _active_ seat
+> session, which requires a foreground virtual terminal — something most
+> container runtimes do not provide (sway then logs `Timeout waiting session to
+become active` / `Failed to start a DRM session`). When that happens the
+> entrypoint automatically retries on the wlroots **headless** backend so a
+> Wayland session always comes up and Hermes can capture. Set `HERMES_KMS=off`
+> to skip the KMS attempt and go straight to headless.
+
 ## Quick start
 
 The compose file pulls the prebuilt image from GHCR — no local build needed:
@@ -228,8 +236,9 @@ initial_enabled=1`); it cannot be loaded from inside a container. sway (in the
   container) drives its `HERMES-1` output and Hermes captures the scanout
   zero-copy from the `hermes_kms` render node. See
   [Virtual display](#virtual-display--hermes-kms).
-- **Headless fallback.** If no `hermes_kms` card is present (or `HERMES_KMS=off`),
-  the container starts sway with the wlroots **headless** backend so the web UI
+- **Headless fallback.** If no `hermes_kms` card is present, `HERMES_KMS=off`, or
+  the KMS DRM session cannot be activated (no foreground VT in the container),
+  the entrypoint starts sway with the wlroots **headless** backend so the web UI
   and pairing still work. This software path is fine for testing but is not the
   intended low-latency streaming path.
 - **Real GPU still needed.** Hermes-KMS is not a render GPU — rendering and
