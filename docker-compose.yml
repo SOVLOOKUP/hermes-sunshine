@@ -41,31 +41,31 @@ services:
       # also be enabled on the host — the norm on modern kernels; see README.)
       - apparmor=unconfined
 
-    # Full host device passthrough. Mounting all of /dev makes every
-    # kernel-created node visible in the container — crucially the dynamically
-    # numbered /dev/hidraw* nodes the hid-playstation / hid-nintendo drivers
-    # spawn when Hermes' inputtino builds a DualSense (PS5) / Switch Pro pad on
-    # /dev/uhid. Those hidraw nodes unlock the full controller feature set
-    # (adaptive triggers, LED, HD rumble) on top of the buttons / sticks / gyro /
-    # touchpad / basic rumble the /dev/uinput + /dev/uhid + evdev path already
-    # provides. Because hidraw's char major is allocated dynamically (no fixed
-    # number to whitelist), the device cgroup has to allow ALL char devices. This
-    # is broad — it grants the container access to every host char device — and
-    # is the trade-off for the complete gamepad experience. Drop back to the
-    # narrow setup (explicit devices + 'c 13:* rmw' + a /dev/input bind) if you
-    # don't need the advanced DualSense features.
+    # Narrow device access: grant only the fixed char-device majors this image
+    # actually needs, instead of every char device. This stops a compromised
+    # game/Steam from reaching unrelated host char devices (mem, tty, snd, ...).
+    #   226 = DRM   (GPU render node + the Hermes-KMS virtual card)
+    #    13 = input (evdev for the virtual gamepad Hermes builds via uinput/uhid;
+    #                this major also covers host input devices — unavoidable for
+    #                gamepad passthrough)
+    #    10 = misc  (/dev/uinput + /dev/uhid, used to synthesise the pads)
+    # Trade-off: /dev/hidraw* is intentionally NOT granted — its char major is
+    # allocated dynamically, so it can't be whitelisted here. Basic controllers
+    # (buttons / sticks / gyro / touchpad / basic rumble via uinput+uhid+evdev)
+    # still work; the hidraw-backed extras (DualSense adaptive triggers / LED /
+    # HD rumble, Switch Pro) are given up in exchange for a much smaller surface.
     #
     # We deliberately do NOT bind-mount the host's /run/udev: the entrypoint runs
     # its own udevd (it relays the Hermes-KMS DRM hotplug to sway) which needs a
-    # writable /run/udev, and that same in-container udevd labels the hidraw/
-    # input nodes as they appear at stream time, so libudev enumeration works
-    # without the host database.
+    # writable /run/udev, and that same in-container udevd labels the input nodes
+    # as they appear at stream time, so libudev enumeration works without the
+    # host database.
     device_cgroup_rules:
-      - 'c *:* rmw'
+      - 'c 226:* rmw' # DRM (GPU + Hermes-KMS card)
+      - 'c 13:* rmw' # input (virtual gamepad evdev)
+      - 'c 10:* rmw' # misc (uinput + uhid)
 
-    # /dev/dri (GPU + Hermes-KMS card), /dev/uinput and /dev/uhid are already
-    # covered by the /dev bind below; kept as explicit documentation of the
-    # devices this image relies on.
+    # The GPU/KMS card plus the uinput/uhid nodes Hermes writes to.
     devices:
       - /dev/dri:/dev/dri
       - /dev/uinput:/dev/uinput
@@ -75,11 +75,9 @@ services:
       - ./config:/config
       # Follow the host timezone automatically (read-only).
       - /etc/localtime:/etc/localtime:ro
-      # Full device tree (see device_cgroup_rules above). Supersedes a narrow
-      # /dev/input bind: besides the evdev nodes it also brings in the
-      # dynamically numbered /dev/hidraw* nodes needed for full DualSense /
-      # Switch Pro support.
-      - /dev:/dev
+      # Share only the input subtree (not all of /dev) so the evdev nodes Hermes
+      # hotplugs for the virtual gamepad appear live in the container.
+      - /dev/input:/dev/input
     # ---- Advanced (optional) ------------------------------------------------
     # Everything below is optional; the image ships sensible defaults.
 
