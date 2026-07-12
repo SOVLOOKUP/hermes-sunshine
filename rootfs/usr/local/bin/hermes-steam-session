@@ -20,6 +20,11 @@ set -euo pipefail
 # Append (don't truncate) so a failed session survives the client reconnecting to
 # read it; a banner separates sessions.
 STEAM_LOG=/var/log/steam.log
+# Cap the session log so long-term reconnects (and any crash loop) can't grow it
+# without bound: keep a single previous generation once it passes ~5 MiB.
+if [ -f "${STEAM_LOG}" ] && [ "$(stat -c%s "${STEAM_LOG}" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
+fi
 exec >>"${STEAM_LOG}" 2>&1
 
 log()  { printf '\033[0;36m[hermes-steam]\033[0m %s\n' "$*" >&2; }
@@ -59,7 +64,9 @@ chmod o+rw "${sockpath}" 2>/dev/null || true
 # on client updates, exiting the launched process; without the inner loop that
 # would tear gamescope down ("Primary child shut down!") and end the session.
 # gamescope itself stays up for the whole connection; Hermes kills this process
-# group when the client disconnects.
+# group when the client disconnects. A run that lasted a while is a healthy
+# re-exec, so reset the delay; only fast, repeated exits are a crash loop, so
+# back off (2s doubling up to 60s) instead of hammering steam every 2s forever.
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
@@ -67,4 +74,16 @@ exec runuser -u steam -- env \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
-    sh -c 'while :; do steam -gamepadui; printf "[hermes-steam] Steam exited (rc=%s); relaunching in 2s\n" "$?"; sleep 2; done'
+    sh -c '
+        delay=2; max=60
+        while :; do
+            start=$(date +%s)
+            steam -gamepadui
+            rc=$?
+            ran=$(( $(date +%s) - start ))
+            [ "${ran}" -ge 30 ] && delay=2
+            printf "[hermes-steam] Steam exited (rc=%s) after %ss; relaunching in %ss\n" "${rc}" "${ran}" "${delay}"
+            sleep "${delay}"
+            [ "${ran}" -lt 30 ] && { delay=$(( delay * 2 )); [ "${delay}" -gt "${max}" ] && delay="${max}"; }
+        done
+    '

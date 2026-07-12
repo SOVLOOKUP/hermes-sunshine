@@ -22,7 +22,7 @@ services:
     network_mode: host
 
     # Screen capture (KMS/DRM) and virtual input both need these.
-    ipc: host
+    # ipc: host
     cap_add:
       - SYS_ADMIN
     security_opt:

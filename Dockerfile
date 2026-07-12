@@ -87,10 +87,10 @@ RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/shar
 RUN pacman -Syu --noconfirm --needed curl \
     && ref="${HERMES_REF}" \
     && if [ "${ref}" = "latest" ]; then \
-    ref="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
+    ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
     fi \
     && echo "Hermes release tag: ${ref}" \
-    && path="$(curl -fsSL "https://github.com/${HERMES_REPO}/releases/expanded_assets/${ref}" | grep -oE "/${HERMES_REPO}/releases/download/[^\"]+x86_64\.pkg\.tar\.zst" | head -n1)" \
+    && path="$(curl -fsSL --retry 3 --retry-delay 2 "https://github.com/${HERMES_REPO}/releases/expanded_assets/${ref}" | grep -oE "/${HERMES_REPO}/releases/download/[^\"]+x86_64\.pkg\.tar\.zst" | head -n1)" \
     && if [ -z "${path}" ]; then echo 'ERROR: no x86_64 Arch package asset found' >&2; exit 1; fi \
     && echo "Downloading https://github.com${path}" \
     && curl -fL --retry 3 -o /tmp/hermes.pkg.tar.zst "https://github.com${path}" \
