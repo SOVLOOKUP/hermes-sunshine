@@ -32,18 +32,18 @@ image, **[Wolf](https://github.com/games-on-whales/wolf)** (Games-on-Whales), an
 **[steam-headless](https://github.com/Steam-Headless/docker-steam-headless)**.
 They aim at different trade-offs:
 
-|                       | **Hermes-Sunshine** (this image)                                   | **Wolf** (Games-on-Whales)                          | **steam-headless**                                    |
-| --------------------- | ------------------------------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------- |
-| Display backend       | **Wayland** (sway/wlroots) on a real **KMS** virtual card          | **Wayland** (custom micro-compositor)               | **X11** (Xorg virtual output)                         |
-| Capture path          | **Zero-copy** DMA-BUF from the `hermes_kms` scanout into the encoder | Raw compositor framebuffer → GStreamer encode       | Sunshine grabs the X11 framebuffer                    |
-| Client resolution     | Rendered at the client's **negotiated native** res per session — no upscaling, no dummy plug | Adaptive per session                     | Fixed virtual output; adaptive res needs xrandr overlays |
-| Audio                 | **PipeWire** virtual sink                                          | PulseAudio (embedded / sidecar)                     | PulseAudio                                            |
-| Out of the box        | Boots into **Steam Big Picture** (console-like); desktop fallback  | Generic app runner — pick/define apps (Steam image incl.) | Full **Xfce desktop** + NoVNC browser access; launch Steam yourself |
-| Concurrency           | Single session                                                     | **Multiple** isolated sessions / users              | Single session                                        |
-| Configuration         | Stock **Sunshine web UI** (pair by PIN)                            | TOML file + Wolf UI app                             | Sunshine web UI + NoVNC                               |
-| Orchestration         | One self-contained container                                       | Spawns per-app containers — needs **`/var/run/docker.sock`** | One container                                 |
-| Main dependency       | **Host kernel module** (Hermes-KMS) for the low-latency path; auto software fallback otherwise | No kernel module          | No kernel module                                      |
-| Base image            | **CachyOS** (perf-tuned Arch)                                      | Ubuntu-based                                        | Debian + Xfce                                         |
+|                   | **Hermes-Sunshine** (this image)                                                               | **Wolf** (Games-on-Whales)                                   | **steam-headless**                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Display backend   | **Wayland** (sway/wlroots) on a real **KMS** virtual card                                      | **Wayland** (custom micro-compositor)                        | **X11** (Xorg virtual output)                                       |
+| Capture path      | **Zero-copy** DMA-BUF from the `hermes_kms` scanout into the encoder                           | Raw compositor framebuffer → GStreamer encode                | Sunshine grabs the X11 framebuffer                                  |
+| Client resolution | Rendered at the client's **negotiated native** res per session — no upscaling, no dummy plug   | Adaptive per session                                         | Fixed virtual output; adaptive res needs xrandr overlays            |
+| Audio             | **PipeWire** virtual sink                                                                      | PulseAudio (embedded / sidecar)                              | PulseAudio                                                          |
+| Out of the box    | Boots into **Steam Big Picture** (console-like); desktop fallback                              | Generic app runner — pick/define apps (Steam image incl.)    | Full **Xfce desktop** + NoVNC browser access; launch Steam yourself |
+| Concurrency       | Single session                                                                                 | **Multiple** isolated sessions / users                       | Single session                                                      |
+| Configuration     | Stock **Sunshine web UI** (pair by PIN)                                                        | TOML file + Wolf UI app                                      | Sunshine web UI + NoVNC                                             |
+| Orchestration     | One self-contained container                                                                   | Spawns per-app containers — needs **`/var/run/docker.sock`** | One container                                                       |
+| Main dependency   | **Host kernel module** (Hermes-KMS) for the low-latency path; auto software fallback otherwise | No kernel module                                             | No kernel module                                                    |
+| Base image        | **CachyOS** (perf-tuned Arch)                                                                  | Ubuntu-based                                                 | Debian + Xfce                                                       |
 
 **Choose this image if** you want a Steam-console experience that streams a
 **true KMS scanout, zero-copy** into the GPU encoder at the client's native
@@ -67,7 +67,7 @@ docker-compose.yml                        ready-to-run service definition
 rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch
 rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher
 rootfs/etc/sway/config                    Wayland session template
-rootfs/etc/pipewire/pipewire.conf.d/      "hermes" virtual audio sink definition
+rootfs/etc/wireplumber/wireplumber.conf.d/ disable hardware audio monitors (keep Hermes' loopback sinks)
 ```
 
 ## Requirements
@@ -290,7 +290,7 @@ denied`.
 | `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                          |
 | `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                               |
 | `START_COMPOSITOR` | `true`                  | Start the Wayland (sway) session.                                                                                                                                               |
-| `START_PIPEWIRE`   | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) and the `hermes` virtual sink.                                                                                                  |
+| `START_PIPEWIRE`   | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) for audio capture. Hermes creates and captures its own loopback sink.                                                           |
 | `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |

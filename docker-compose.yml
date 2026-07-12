@@ -21,8 +21,10 @@ services:
     # Docker engine. On Docker Desktop, comment this out and use "ports:" below.
     network_mode: host
 
-    # Screen capture (KMS/DRM) and virtual input both need these.
-    # ipc: host
+    # REQUIRED for Steam Big Picture. Steam's pressure-vessel sandbox relies on
+    # the host SysV IPC / shared-memory namespace; without ipc:host the streamed
+    # session never launches Steam (you only get the fallback terminal).
+    ipc: host
     cap_add:
       - SYS_ADMIN
     security_opt:

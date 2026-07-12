@@ -387,8 +387,9 @@ start_compositor() {
 # under one shared, world-usable runtime dir so Hermes (root) and the non-root
 # steam user reach the same server. PipeWire warns under root but works; it has
 # no PulseAudio-style "system mode", so a single fixed-path server is the
-# container equivalent. The "hermes" null sink is defined in pipewire.conf.d and
-# recreated on every daemon (re)start, so the watchdog only relaunches daemons.
+# container equivalent. Hermes creates its own loopback sinks (sink-sunshine-*)
+# at stream time and captures them, so we define no sink here — the watchdog only
+# relaunches daemons and reopens the socket.
 PIPEWIRE_RUNTIME_DIR=/run/pipewire
 PULSE_SOCKET="${PIPEWIRE_RUNTIME_DIR}/pulse/native"
 
@@ -401,10 +402,11 @@ pw_alive() {
 
 pw_ready() {
     # Runs once the pulse socket answers. The non-root steam user connects to the
-    # root-owned socket, so open it up. The sink itself comes from
-    # pipewire.conf.d; just pin it as the default for apps that don't pick a sink.
+    # root-owned socket, so open it up. We do NOT pin a default sink: Hermes
+    # creates its own loopback sinks (sink-sunshine-stereo / -surround51 /
+    # -surround71) at stream start and sets the one matching the negotiated
+    # channel layout as the default itself, then captures that same sink.
     chmod 0666 "${PULSE_SOCKET}" 2>/dev/null || true
-    PULSE_SERVER="unix:${PULSE_SOCKET}" pactl set-default-sink hermes >/dev/null 2>&1 || true
 }
 
 _pw_spawn() {
@@ -425,7 +427,7 @@ start_pipewire() {
     for _ in $(seq 1 40); do pw_alive && break; sleep 0.3; done
     if pw_alive; then
         pw_ready
-        log "PipeWire up; sink 'hermes' is the default (socket ${PULSE_SOCKET})"
+        log "PipeWire up (pulse socket ${PULSE_SOCKET}); Hermes manages its own loopback sink"
     else
         warn "PipeWire pulse socket not reachable (see /var/log/pipewire*.log)"
         return 1
@@ -434,8 +436,8 @@ start_pipewire() {
 
 # PipeWire has no supervisor here and the entrypoint execs into hermes, so watch
 # it in the background: when the control socket stops answering, relaunch the
-# trio (the null sink comes back from config) and re-pin the default sink so the
-# next client gets audio without a container restart.
+# trio and reopen the socket. Hermes recreates its own loopback sink on the next
+# stream, so there is no default to re-pin here.
 start_pipewire_watchdog() {
     (
         set +e
@@ -451,7 +453,7 @@ start_pipewire_watchdog() {
             for _ in $(seq 1 40); do pw_alive && break; sleep 0.3; done
             if pw_alive; then
                 pw_ready
-                log "PipeWire restarted; default sink restored"
+                log "PipeWire restarted"
             else
                 warn "PipeWire restart failed (see /var/log/pipewire*.log)"
             fi
@@ -570,12 +572,16 @@ seed_config() {
     if [ "${KMS_ZEROCOPY}" = "true" ]; then
         ensure_conf_key headless_mode enabled
     fi
-    # Pin capture to the null-sink monitor we own ("hermes"). Otherwise Hermes
-    # auto-picks a default sink, which can drift to a client-created sink on
-    # reconnect and leave the stream silent; the watchdog always recreates
-    # "hermes" as the default, so hermes.monitor is the one stable source.
+    # Audio: let Hermes fully own its loopback sinks. It creates
+    # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
+    # stream's channel layout as the PipeWire default (so Steam/games play into
+    # it), and captures that same sink — capture and playback stay aligned.
+    # Do NOT pin audio_sink: an earlier build pinned it to a custom "hermes" null
+    # sink, but Hermes still made sink-sunshine-stereo the default, so games
+    # played into sink-sunshine-stereo while Hermes recorded the silent
+    # hermes.monitor. Strip that stale pin from existing configs so sound returns.
     if [ "${START_PIPEWIRE}" = "true" ]; then
-        ensure_conf_key audio_sink hermes
+        sed -i -E '/^[[:space:]]*audio_sink[[:space:]]*=[[:space:]]*hermes[[:space:]]*$/d' "${HERMES_CONFIG}" 2>/dev/null || true
     fi
 }
 
