@@ -12,11 +12,14 @@
 # so the resolution is applied at runtime by the entrypoint via swaymsg rather
 # than hardcoded here.
 
-# Streaming-friendly defaults: no decorations, hide the idle cursor.
-default_border none
-default_floating_border none
+# Usable-desktop defaults: thin borders so windows are distinguishable, hide the
+# idle cursor. gamescope/Steam override the border to none and go fullscreen via
+# a for_window rule (see the entrypoint), so the streamed game is unaffected.
+default_border pixel 2
+default_floating_border pixel 2
 seat * hide_cursor 5000
 focus_follows_mouse no
+font pango:monospace 10
 
 # --- output layout ----------------------------------------------------------
 # Moonlight captures the Hermes-KMS "Virtual-1" connector, which is hotplugged
@@ -37,6 +40,60 @@ exec_always dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CUR
 
 # X11 application support. Toggled by ENABLE_XWAYLAND (enable/disable).
 __XWAYLAND__
+
+# --- desktop keybindings ----------------------------------------------------
+# A minimal but usable desktop for when the plain Wayland session (not Steam) is
+# streamed. Super is the modifier; foot is the terminal and wofi the app menu
+# (both installed in the image). These stay out of Steam's way: gamescope runs
+# fullscreen and grabs the input it needs.
+set $mod Mod4
+set $term foot
+set $menu wofi --show drun
+
+floating_modifier $mod normal
+
+bindsym $mod+Return exec $term
+bindsym $mod+d exec $menu
+bindsym $mod+Shift+q kill
+bindsym $mod+Shift+c reload
+bindsym $mod+f fullscreen
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+b splith
+bindsym $mod+v splitv
+
+# focus / move with the arrow keys
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+
+# workspaces 1-5
+bindsym $mod+1 workspace number 1
+bindsym $mod+2 workspace number 2
+bindsym $mod+3 workspace number 3
+bindsym $mod+4 workspace number 4
+bindsym $mod+5 workspace number 5
+bindsym $mod+Shift+1 move container to workspace number 1
+bindsym $mod+Shift+2 move container to workspace number 2
+bindsym $mod+Shift+3 move container to workspace number 3
+bindsym $mod+Shift+4 move container to workspace number 4
+bindsym $mod+Shift+5 move container to workspace number 5
+
+# --- status bar -------------------------------------------------------------
+# swaybar (bundled with sway) with a lightweight clock; no extra package needed.
+# Fullscreen windows (gamescope/Steam) hide it automatically.
+bar {
+    position top
+    status_command while date +'%Y-%m-%d  %H:%M:%S'; do sleep 1; done
+    colors {
+        statusline #ffffff
+        background #1a1a1aee
+    }
+}
 
 # User overrides: drop *.conf snippets into ./config/sway.d/ on the host.
 include /config/sway.d/*
