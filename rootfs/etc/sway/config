@@ -35,6 +35,20 @@ output "HEADLESS-1" position 7680 0
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 
+# --- absolute input mapping -------------------------------------------------
+# Touch and pen input Moonlight injects carry coordinates normalised to the
+# streamed output. By default sway spreads absolute input across the whole
+# output layout, which here includes the off-screen HEADLESS-1 placeholder at
+# x=7680 — so taps land in dead space instead of on the picture. Pin the
+# absolute-only devices (touch, tablet/pen) to the captured Virtual-1 output so
+# their coordinates map 1:1 onto what the client sees. Do NOT map type:pointer:
+# that wildcard also catches the relative mouse and breaks cursor rendering. On
+# the headless fallback path Virtual-1 is absent; sway then leaves these on the
+# single real output (which already spans the whole layout), so touch still
+# works there.
+input type:touch map_to_output Virtual-1
+input type:tablet_tool map_to_output Virtual-1
+
 # Hermes replugs Virtual-1 on every app switch; while it is gone sway parks
 # focus on the off-screen HEADLESS-1 placeholder and never moves it back, so the
 # next app streams video from Virtual-1 but keyboard/mouse input goes off-screen.

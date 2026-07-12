@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep sway's focus on the streamed Virtual-1 output.
+# Keep sway's focus — and absolute-input mapping — on the streamed Virtual-1 output.
 #
 # Hermes unplugs and replugs the per-session "Virtual-1" DRM connector on every
 # app switch. While it is gone sway parks focus (and a stray workspace) on the
@@ -8,13 +8,25 @@
 # Virtual-1 but keyboard/mouse input silently goes to the invisible HEADLESS-1.
 # React to output/workspace events and snap focus back to Virtual-1 whenever it
 # is present and not already focused (the guard avoids a refocus feedback loop).
+#
+# The replug also drops the touch/pen/absolute-pointer -> Virtual-1 mapping set
+# in the sway config (absolute coordinates are normalised to the streamed
+# output; without the mapping they spread across the whole layout, including the
+# off-screen placeholder, and taps land in dead space with the cursor stuck
+# mid-screen). Re-assert that mapping each time Virtual-1 reappears.
 set -euo pipefail
+
+remap_inputs() {
+    swaymsg 'input type:touch map_to_output Virtual-1' >/dev/null 2>&1 || true
+    swaymsg 'input type:tablet_tool map_to_output Virtual-1' >/dev/null 2>&1 || true
+}
 
 refocus() {
     local outs
     outs="$(swaymsg -t get_outputs 2>/dev/null)" || return 0
     # Nothing to do until the streamed connector is actually present.
     printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1")' >/dev/null 2>&1 || return 0
+    remap_inputs
     # Already focused? leave it alone so we don't fight the compositor.
     printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1" and .focused)' >/dev/null 2>&1 && return 0
     swaymsg 'focus output Virtual-1' >/dev/null 2>&1 || true
