@@ -382,76 +382,83 @@ start_compositor() {
     fi
 }
 
-# --- audio ------------------------------------------------------------------
-PULSE_ARGS=(--system --daemonize=true --disallow-exit=true
-    --exit-idle-time=-1 --log-target=stderr --realtime=false --high-priority=false)
+# --- audio (PipeWire) -------------------------------------------------------
+# Run the whole PipeWire stack (pipewire + wireplumber + pipewire-pulse) as root
+# under one shared, world-usable runtime dir so Hermes (root) and the non-root
+# steam user reach the same server. PipeWire warns under root but works; it has
+# no PulseAudio-style "system mode", so a single fixed-path server is the
+# container equivalent. The "hermes" null sink is defined in pipewire.conf.d and
+# recreated on every daemon (re)start, so the watchdog only relaunches daemons.
+PIPEWIRE_RUNTIME_DIR=/run/pipewire
+PULSE_SOCKET="${PIPEWIRE_RUNTIME_DIR}/pulse/native"
 
-pulse_alive() {
-    # A crashed daemon leaves /run/pulse/native behind, so the socket existing
-    # proves nothing — it just answers new connections with "Connection refused".
-    # Probe the control protocol instead of stat-ing the socket or the pid.
-    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" pactl info >/dev/null 2>&1
+pw_alive() {
+    # The pulse-compat server answering the control protocol is the real proof
+    # the stack is up — an orphaned socket just refuses connections. This is the
+    # path Hermes and Steam actually connect through.
+    PULSE_SERVER="unix:${PULSE_SOCKET}" pactl info >/dev/null 2>&1
 }
 
-ensure_pulse_sink() {
-    # Idempotent: create the null sink Hermes captures (its .monitor is the audio
-    # source) and make it the default so apps render into it. Re-loading an
-    # existing module is a harmless no-op error.
-    pactl load-module module-null-sink \
-        sink_name=hermes sink_properties=device.description=Hermes-Virtual-Sink \
-        >/dev/null 2>&1 || true
-    pactl set-default-sink hermes >/dev/null 2>&1 || true
+pw_ready() {
+    # Runs once the pulse socket answers. The non-root steam user connects to the
+    # root-owned socket, so open it up. The sink itself comes from
+    # pipewire.conf.d; just pin it as the default for apps that don't pick a sink.
+    chmod 0666 "${PULSE_SOCKET}" 2>/dev/null || true
+    PULSE_SERVER="unix:${PULSE_SOCKET}" pactl set-default-sink hermes >/dev/null 2>&1 || true
 }
 
-start_pulse() {
-    log "starting PulseAudio (system mode) with a virtual sink"
-    pulseaudio "${PULSE_ARGS[@]}" 2>/var/log/pulse.log \
-        || { warn "PulseAudio failed to start (see /var/log/pulse.log)"; return 1; }
+_pw_spawn() {
+    pipewire       >>/var/log/pipewire.log       2>&1 & PIDS+=("$!")
+    wireplumber    >>/var/log/wireplumber.log    2>&1 & PIDS+=("$!")
+    pipewire-pulse >>/var/log/pipewire-pulse.log 2>&1 & PIDS+=("$!")
+}
 
-    export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
-    for _ in $(seq 1 20); do
-        pulse_alive && break
-        sleep 0.3
-    done
-    if pulse_alive; then
-        ensure_pulse_sink
-        log "virtual audio sink 'hermes' ready"
+start_pipewire() {
+    log "starting PipeWire (pipewire + wireplumber + pipewire-pulse)"
+    mkdir -p "${PIPEWIRE_RUNTIME_DIR}/pulse"
+    chmod 0777 "${PIPEWIRE_RUNTIME_DIR}" "${PIPEWIRE_RUNTIME_DIR}/pulse"
+    export PIPEWIRE_RUNTIME_DIR PULSE_RUNTIME_PATH="${PIPEWIRE_RUNTIME_DIR}/pulse"
+    _pw_spawn
+    # Hermes reaches PipeWire through the pulse-compat socket.
+    export PULSE_SERVER="unix:${PULSE_SOCKET}"
+    local _
+    for _ in $(seq 1 40); do pw_alive && break; sleep 0.3; done
+    if pw_alive; then
+        pw_ready
+        log "PipeWire up; sink 'hermes' is the default (socket ${PULSE_SOCKET})"
     else
-        warn "PulseAudio control socket not reachable"
+        warn "PipeWire pulse socket not reachable (see /var/log/pipewire*.log)"
+        return 1
     fi
 }
 
-# PulseAudio has no supervisor here and the entrypoint execs into hermes, so once
-# the daemon dies nothing restarts it: the stream keeps video but loses sound
-# until the whole container is restarted (the stale socket lingers and only
-# answers "Connection refused"). Watch it in the background and, when the control
-# socket stops answering, clear the stale socket, respawn the daemon and rebuild
-# the sink so the next client gets audio without a container restart.
-start_pulse_watchdog() {
+# PipeWire has no supervisor here and the entrypoint execs into hermes, so watch
+# it in the background: when the control socket stops answering, relaunch the
+# trio (the null sink comes back from config) and re-pin the default sink so the
+# next client gets audio without a container restart.
+start_pipewire_watchdog() {
     (
         set +e
         while :; do
             sleep 5
-            pulse_alive && continue
-            warn "PulseAudio is unreachable; restarting it"
-            pkill -x pulseaudio 2>/dev/null
+            pw_alive && continue
+            warn "PipeWire is unreachable; restarting it"
+            pkill -x pipewire-pulse 2>/dev/null
+            pkill -x wireplumber    2>/dev/null
+            pkill -x pipewire       2>/dev/null
             sleep 1
-            # Clear the whole stale runtime state, not just the socket: a leftover
-            # pid file makes a system-mode daemon refuse to start ("Daemon startup
-            # failed") even though nothing is listening.
-            rm -f /run/pulse/native /run/pulse/pid
-            pulseaudio "${PULSE_ARGS[@]}" 2>>/var/log/pulse.log
-            for _ in $(seq 1 20); do pulse_alive && break; sleep 0.3; done
-            if pulse_alive; then
-                ensure_pulse_sink
-                log "PulseAudio restarted; audio sink rebuilt"
+            _pw_spawn
+            for _ in $(seq 1 40); do pw_alive && break; sleep 0.3; done
+            if pw_alive; then
+                pw_ready
+                log "PipeWire restarted; default sink restored"
             else
-                warn "PulseAudio restart failed (see /var/log/pulse.log)"
+                warn "PipeWire restart failed (see /var/log/pipewire*.log)"
             fi
         done
     ) &
     PIDS+=("$!")
-    log "pulse watchdog started"
+    log "pipewire watchdog started"
 }
 
 # --- GPU access for the non-root steam user ---------------------------------
@@ -482,7 +489,7 @@ grant_gpu_access() {
     done
 }
 
-# --- Steam Big Picture (…-steam image variant only) -------------------------
+# --- Steam Big Picture -------------------------------------------------------
 # Steam is NOT autostarted. It is registered as a per-session Hermes app: when a
 # client streams "Steam Big Picture", Hermes runs ${STEAM_SESSION_CMD} at the
 # client's negotiated resolution (native, no upscaling) as the non-root "steam"
@@ -567,7 +574,7 @@ seed_config() {
     # auto-picks a default sink, which can drift to a client-created sink on
     # reconnect and leave the stream silent; the watchdog always recreates
     # "hermes" as the default, so hermes.monitor is the one stable source.
-    if [ "${START_PULSE}" = "true" ]; then
+    if [ "${START_PIPEWIRE}" = "true" ]; then
         ensure_conf_key audio_sink hermes
     fi
 }
@@ -583,7 +590,7 @@ seed_config() {
 #     user (root here); Steam refuses to run as root, so it silently no-ops.
 #   • "Gamescope Steam Session" runs `hermes-gamescope-launch`, which likewise
 #     starts Steam as root and cannot work here.
-# On the -steam image we instead register our own per-session launcher as the
+# We instead register our own per-session launcher as the
 # "Steam Big Picture" cmd (see configure_steam_app), so streaming that app brings
 # Steam up correctly at the client's resolution. Strip the broken commands, drop
 # the redundant "Low Res Desktop" and gamescope-launch apps in place, idempotently,
@@ -621,7 +628,7 @@ sanitize_apps() {
 }
 
 # --- register the per-session Steam launcher --------------------------------
-# On the -steam image, point the "Steam Big Picture" app's cmd at our per-session
+# Point the "Steam Big Picture" app's cmd at our per-session
 # launcher so Hermes runs it (at the client's negotiated resolution) when the app
 # is streamed. Fresh /config volumes already carry this in the apps.json template;
 # this patches an existing /config idempotently — updating the cmd, or appending
@@ -663,12 +670,11 @@ if [ "${START_COMPOSITOR}" = "true" ]; then
     start_udev || warn "continuing without udev (Hermes-KMS hotplug may not be seen)"
     start_compositor || warn "continuing without a Wayland session (capture will fail)"
 fi
-[ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; start_pulse_watchdog; }
+[ "${START_PIPEWIRE}" = "true" ] && { start_pipewire || warn "continuing without audio"; start_pipewire_watchdog; }
 
-# Steam Big Picture per-session prep (only does anything on the …-steam image,
-# where steam + gamescope + the steam user exist). Needs the Wayland session and
-# audio above. This does NOT start Steam — it just readies the steam user so the
-# per-session launcher (run by Hermes when the app is streamed) works.
+# Steam Big Picture per-session prep. Needs the Wayland session and audio above.
+# This does NOT start Steam — it just readies the steam user so the per-session
+# launcher (run by Hermes when the app is streamed) works.
 [ "${START_COMPOSITOR}" = "true" ] && { prepare_steam || warn "Steam prep failed (see /var/log/steam.log)"; }
 
 # --- hardware encode diagnostics (non-fatal) --------------------------------

@@ -1,22 +1,18 @@
 services:
   sunshine:
     # Published image (built & pushed by the bundled GitHub Actions workflow).
-    # image: ghcr.io/sovlookup/hermes-sunshine:latest
+    # It boots straight into Steam Big Picture as a per-session app (see README).
+    image: ghcr.io/sovlookup/hermes-sunshine:latest
     # China users: swap the line above for the Nanjing University GHCR mirror to
     # pull much faster (uncomment this, comment the ghcr.io line above):
     # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
-    #
-    # Steam Big Picture: stream the "Steam Big Picture" app to launch Steam at
-    # the client's resolution (see README). Use the parallel "-steam" tag:
-    image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
-    # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest-steam
 
     container_name: sunshine
     restart: unless-stopped
 
     # Run tini as PID 1 (docker's built-in init). The entrypoint execs into
     # hermes, which then inherits every backgrounded daemon (dbus, seatd, udevd,
-    # PulseAudio, sway, the watchdogs) plus the many short-lived per-session
+    # PipeWire, sway, the watchdogs) plus the many short-lived per-session
     # Steam/gamescope children that get reparented to PID 1. tini reaps those
     # zombies and forwards signals so the container stops cleanly.
     init: true
@@ -37,8 +33,7 @@ services:
       # a default container (/proc/kcore, /sys/firmware, …), which can't be
       # re-propagated even with SYS_ADMIN — bwrap dies with "Failed to make /
       # slave: Permission denied" (rc=71). systempaths=unconfined drops those
-      # locked mounts so the recursive rslave succeeds. Only needed for the
-      # -steam image; harmless on the plain image.
+      # locked mounts so the recursive rslave succeeds.
       - systempaths=unconfined
       # On hosts where AppArmor is loaded (Ubuntu/Debian), its default docker
       # profile also denies those same mount() calls. Unconfining is a no-op
@@ -96,10 +91,10 @@ services:
     #   DISPLAY_HEIGHT: "1080"
     #   DISPLAY_REFRESH: "60"
     #   START_COMPOSITOR: "true" # Wayland (sway) session
-    #   START_PULSE: "true"
+    #   START_PIPEWIRE: "true"   # PipeWire audio (+ virtual sink)
     #   START_AVAHI: "true"
     #   ENABLE_XWAYLAND: "true"  # X11 app compatibility
-    #   AUTOSTART_STEAM: "true"  # -steam image only: register Steam Big Picture app
+    #   AUTOSTART_STEAM: "true"  # register Steam Big Picture app (false = stream the desktop)
 
     # Explicit port mappings — use these ONLY when you cannot use host
     # networking (e.g. Docker Desktop). Comment out "network_mode: host" first.

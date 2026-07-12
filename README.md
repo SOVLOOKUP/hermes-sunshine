@@ -10,7 +10,7 @@ installs it with `pacman -U`, which pulls in every runtime dependency (FFmpeg,
 boost, VAAPI, …) from the repos. The build is therefore tiny and fast.
 
 The image is self-contained: it starts a **Wayland** session (the
-[sway](https://swaywm.org/) wlroots compositor), a PulseAudio virtual sink, and
+[sway](https://swaywm.org/) wlroots compositor), a PipeWire virtual sink, and
 mDNS discovery, then launches the host. The virtual monitor comes from the
 [**Hermes-KMS**](https://github.com/MrOz59/Hermes-KMS) kernel module loaded on
 the **host**: sway drives its DRM output (`HERMES-1`) and Hermes captures the
@@ -31,8 +31,9 @@ Sunshine. Clients: **Moonlight**, **Artemis**, or **Hestia**.
 Dockerfile                                single-stage build (download + install pkg)
 docker-compose.yml                        ready-to-run service definition
 rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch
-rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher (-steam)
+rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher
 rootfs/etc/sway/config                    Wayland session template
+rootfs/etc/pipewire/pipewire.conf.d/      "hermes" virtual audio sink definition
 ```
 
 ## Requirements
@@ -130,7 +131,6 @@ _The PIN page_ of the web UI.
 | `HERMES_REPO`   | `MrOz59/Hermes`          | GitHub `owner/repo` to pull the release from.                                                    |
 | `HERMES_REF`    | `latest`                 | Release to install: `latest` or a specific tag (e.g. `v0.4.0`).                                  |
 | `USE_CN_MIRROR` | `true`                   | Use fast China mirrors (USTC + Tsinghua) for pacman. Set to `false` when building outside China. |
-| `INSTALL_STEAM` | `false`                  | Bundle Steam Big Picture + gamescope and a non-root `steam` user (the `-steam` image variant).   |
 
 > **Mirrors.** `USE_CN_MIRROR` defaults to `true` so local builds in China are
 > fast (USTC primary, Tsinghua secondary; the global CDN stays as fallback).
@@ -163,18 +163,12 @@ builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`):
 docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
 docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0   # pinned to a Hermes release
 
-# Steam Big Picture variant (see "Steam Big Picture" below):
-docker pull ghcr.io/sovlookup/hermes-sunshine:latest-steam
-docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0-steam
-
 # China: use the Nanjing University GHCR mirror for a faster pull
 docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
 ```
 
-Every build publishes **two parallel variants** from the same Dockerfile: the
-plain streaming host and a **`-steam`** flavour that also bundles Steam Big
-Picture (see below). The tags mirror each other, e.g. `latest` ↔ `latest-steam`
-and `hermes-<tag>` ↔ `hermes-<tag>-steam`.
+Each build publishes a single image (tags `latest` and `hermes-<tag>`) that boots
+straight into **Steam Big Picture** (see below).
 
 It runs on three triggers:
 
@@ -193,22 +187,13 @@ its `hermes-<tag>` tag. Runners are outside China, so the workflow passes
 
 ## Steam Big Picture
 
-The **`-steam`** image variant boots straight into **Steam Big Picture** on the
-streamed display — plug in a controller and it behaves like a console. It bundles
-Steam, [gamescope](https://github.com/ValveSoftware/gamescope), and the 32-bit
-AMD graphics stack on top of the normal streaming host.
+The image boots straight into **Steam Big Picture** on the streamed display —
+plug in a controller and it behaves like a console. It bundles Steam,
+[gamescope](https://github.com/ValveSoftware/gamescope), and the 32-bit AMD
+graphics stack on top of the headless streaming host.
 
 ```bash
-docker compose up -d      # after switching the image tag to `latest-steam`
-```
-
-Point `docker-compose.yml` at the steam tag (the `image:` line has a
-commented-out alternative ready to uncomment):
-
-```yaml
-image: ghcr.io/sovlookup/hermes-sunshine:latest-steam
-# China mirror:
-# image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest-steam
+docker compose up -d
 ```
 
 How it works and what to know:
@@ -229,7 +214,7 @@ How it works and what to know:
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
-  and PulseAudio sockets are shared across to the `steam` user.
+  and PipeWire (pulse-compatible) sockets are shared across to the `steam` user.
 - **Persistent library.** Steam's data (client bootstrap, login, installed games,
   config) lives in `/config/steam`, so it survives container recreation. Games
   can be large — make sure the `/config` volume has room, or bind-mount a bigger
@@ -254,8 +239,8 @@ How it works and what to know:
 >    denies the same mounts on hosts where AppArmor is loaded).
 >
 > Without these, Steam exits immediately (`rc=71`) logging `Steam now requires
-> user namespaces to be enabled` and `bwrap: Failed to make / slave: Permission
-> denied`.
+user namespaces to be enabled` and `bwrap: Failed to make / slave: Permission
+denied`.
 
 > **AMD-only graphics stack.** The bundled 32-bit drivers are `vulkan-radeon` /
 > `lib32-mesa` (AMD/Intel VAAPI + RADV). NVIDIA users need the NVIDIA Container
@@ -263,20 +248,20 @@ How it works and what to know:
 
 ## Runtime environment variables
 
-| Variable           | Default                 | Description                                                                                                                                                                                     |
-| ------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TZ`               | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                                 |
-| `HERMES_KMS`       | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                                         |
-| `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                                                                                           |
-| `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                                          |
-| `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                                               |
-| `START_COMPOSITOR` | `true`                  | Start the Wayland (sway) session.                                                                                                                                                               |
-| `START_PULSE`      | `true`                  | Start PulseAudio + virtual sink.                                                                                                                                                                |
-| `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                                |
-| `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                                         |
-| `AUTOSTART_STEAM`  | `true`                  | On the `-steam` image, register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered. No effect on the plain image. |
-| `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                                             |
-| `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                                                                                   |
+| Variable           | Default                 | Description                                                                                                                                                                     |
+| ------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TZ`               | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                 |
+| `HERMES_KMS`       | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                         |
+| `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                                                                           |
+| `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                          |
+| `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                               |
+| `START_COMPOSITOR` | `true`                  | Start the Wayland (sway) session.                                                                                                                                               |
+| `START_PIPEWIRE`   | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) and the `hermes` virtual sink.                                                                                                  |
+| `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
+| `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
+| `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |
+| `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
+| `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                                                                   |
 
 The virtual output resolution is set at runtime from `DISPLAY_WIDTH`/`HEIGHT`/
 `REFRESH`. Drop extra sway snippets into `./config/sway.d/*.conf` on the host to

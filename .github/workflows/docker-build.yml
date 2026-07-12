@@ -97,21 +97,6 @@ jobs:
       contents: read
       packages: write
 
-    # Publish two parallel variants from the one Dockerfile: the plain streaming
-    # host and a "-steam" flavour that also bundles Steam Big Picture + gamescope
-    # (INSTALL_STEAM=true). They share the base cache layers but keep separate gha
-    # cache scopes so the heavier Steam layer never evicts the base one.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: base
-            suffix: ""
-            install_steam: "false"
-          - variant: steam
-            suffix: "-steam"
-            install_steam: "true"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -132,10 +117,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ env.IMAGE_NAME }}
-          # The matrix suffix (""/"-steam") is appended to every tag, and
-          # onlatest=true means the steam variant also gets a "latest-steam".
-          flavor: |
-            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=raw,value=hermes-${{ needs.resolve.outputs.hermes_ref }}
             type=ref,event=branch
@@ -154,10 +135,8 @@ jobs:
           # Outside China: use the default global CDN, not the CN mirrors. Pin
           # the exact Hermes release resolved above so the image content matches
           # its `hermes-<tag>` tag (no drift if upstream releases mid-build).
-          # INSTALL_STEAM adds the Steam/gamescope layer only for the steam variant.
           build-args: |
             USE_CN_MIRROR=false
             HERMES_REF=${{ needs.resolve.outputs.hermes_ref }}
-            INSTALL_STEAM=${{ matrix.install_steam }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

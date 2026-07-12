@@ -45,7 +45,7 @@ ENV LANG=C.UTF-8 \
     DISPLAY_REFRESH=60 \
     # Feature toggles handled by the entrypoint
     START_COMPOSITOR=true \
-    START_PULSE=true \
+    START_PIPEWIRE=true \
     START_AVAHI=true \
     ENABLE_XWAYLAND=true
 # TZ is intentionally left unset: with no explicit TZ the entrypoint follows
@@ -77,7 +77,7 @@ RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/shar
 
 # Download the prebuilt Hermes Arch package from GitHub releases and install it
 # with `pacman -U` (which resolves + installs its runtime deps from the repos),
-# then add the headless Wayland session stack (sway/wlroots, PulseAudio, dbus,
+# then add the headless Wayland session stack (sway/wlroots, PipeWire, dbus,
 # avahi, Mesa/VAAPI, XWayland) plus the clipboard tools Hermes shells out to
 # (wl-clipboard's wl-copy/wl-paste on Wayland, xclip on X11).
 #
@@ -109,24 +109,22 @@ RUN pacman -Syu --noconfirm --needed curl \
     foot \
     wofi \
     jq \
-    pulseaudio \
-    pulseaudio-alsa \
+    pipewire \
+    pipewire-pulse \
+    pipewire-audio \
+    wireplumber \
+    libpulse \
     tzdata \
     && pacman -Scc --noconfirm \
     && rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
-# The pulseaudio (system mode) and avahi daemons drop privileges to dedicated
-# system users that Arch normally creates via systemd-sysusers — which does not
-# run during an image build. Create them here so both daemons can start. root
-# joins pulse-access so the entrypoint's pactl can reach the system daemon.
-RUN useradd --system --user-group --home-dir /var/run/pulse \
-    --shell /usr/bin/nologin --comment PulseAudio pulse 2>/dev/null || true; \
-    groupadd --system pulse-access 2>/dev/null || true; \
-    usermod -aG audio,pulse-access pulse 2>/dev/null || true; \
-    install -d -o pulse -g pulse /var/run/pulse /var/lib/pulse; \
-    useradd --system --user-group --home-dir / \
-    --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true; \
-    usermod -aG pulse-access root 2>/dev/null || true
+# The avahi daemon drops privileges to a dedicated system user that Arch normally
+# creates via systemd-sysusers — which does not run during an image build. Create
+# it here so avahi can start. PipeWire needs no such user: the entrypoint runs the
+# whole stack (pipewire / wireplumber / pipewire-pulse) as root with a shared
+# runtime dir, so there is no system daemon to drop privileges for.
+RUN useradd --system --user-group --home-dir / \
+    --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true
 
 # KMS/DRM capture path needs CAP_SYS_ADMIN; grant it as a file capability
 # (mirrors hermes.install do_setcap). Requires --cap-add=SYS_ADMIN at runtime.
@@ -136,18 +134,17 @@ RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
 
-# --- optional: Steam Big Picture variant ------------------------------------
-# Published as a parallel image tag (…-steam). When INSTALL_STEAM=true this
-# enables the [multilib] repo, installs Steam + gamescope and the 32-bit AMD
-# graphics stack, and creates a dedicated non-root "steam" user — Steam refuses
-# to run as root and its container runtime (pressure-vessel) misbehaves as root.
-# The entrypoint registers "Steam Big Picture" as a per-session Hermes app: when
-# a client streams it, Hermes runs the launcher at the client's negotiated
-# resolution (toggle with AUTOSTART_STEAM). Declared last so the ARG only
-# invalidates this layer and the base image below still shares all cache above.
-# The `sed` uncomments the [multilib] block (a no-op if it is already enabled).
-ARG INSTALL_STEAM=false
-RUN if [ "${INSTALL_STEAM}" = "true" ]; then set -eu; \
+# --- Steam Big Picture -------------------------------------------------------
+# This image is built around the Steam experience: enable the [multilib] repo,
+# install Steam + gamescope and the 32-bit AMD graphics stack, and create a
+# dedicated non-root "steam" user — Steam refuses to run as root and its
+# container runtime (pressure-vessel) misbehaves as root. The entrypoint
+# registers "Steam Big Picture" as a per-session Hermes app: when a client
+# streams it, Hermes runs the launcher at the client's negotiated resolution
+# (toggle with AUTOSTART_STEAM). lib32-libpulse is Steam's 32-bit audio client;
+# it talks to the PipeWire pulse-compat socket. The `sed` uncomments the
+# [multilib] block (a no-op if it is already enabled).
+RUN set -eu; \
     sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf; \
     pacman -Syu --noconfirm --needed \
     steam \
@@ -160,12 +157,11 @@ RUN if [ "${INSTALL_STEAM}" = "true" ]; then set -eu; \
     lib32-libpulse; \
     useradd --uid 1000 --user-group --create-home --home-dir /home/steam \
     --shell /bin/bash steam; \
-    for g in video render audio input pulse-access seat; do \
+    for g in video render audio input seat; do \
     getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
     pacman -Scc --noconfirm; \
-    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*; \
-    fi
+    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
 # Sunshine/Moonlight ports:
 #   47984-47990/tcp : RTSP, control, web UI (47990)
@@ -177,7 +173,7 @@ EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 # serving. `-k` skips cert verification and no `-f` is used, so any HTTP response
 # counts as healthy — we only fail when the connection is refused or times out
 # (hermes crashed/wedged), letting the restart policy recycle a dead container.
-# start-period covers the slow first boot (Steam bootstrap on the -steam image).
+# start-period covers the slow first boot (Steam's first-run bootstrap).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -kso /dev/null --max-time 4 https://localhost:47990 || exit 1
 
