@@ -520,20 +520,23 @@ seed_config() {
 # --- sanitize the app list --------------------------------------------------
 # Hermes ships a default app list (copied to $APPS_JSON on first run) tailored to
 # a physical X11 desktop and a non-root Steam, neither of which fits this image:
-#   • "Low Res Desktop" runs `xrandr --output HDMI-1 ...` — fails on our headless
-#     Wayland session and aborts the stream.
+#   • "Low Res Desktop" runs `xrandr --output HDMI-1 ...` to switch resolution —
+#     that fails on our virtual Wayland output, and resolution is negotiated by
+#     the Moonlight client anyway, so once its xrandr command is stripped it is
+#     just a duplicate of "Desktop". We drop the whole entry.
 #   • "Steam Big Picture" runs `setsid steam steam://...` as the Hermes process
 #     user (root here); Steam refuses to run as root, so it silently no-ops.
 #   • "Gamescope Steam Session" runs `hermes-gamescope-launch`, which likewise
 #     starts Steam as root and cannot work here.
 # On the -steam image we instead register our own per-session launcher as the
 # "Steam Big Picture" cmd (see configure_steam_app), so streaming that app brings
-# Steam up correctly at the client's resolution. Strip the broken commands and
-# drop the gamescope-launch app in place, idempotently, so existing configs get
-# fixed too. Fresh configs get the cleaned /usr/share/hermes/apps.json template.
+# Steam up correctly at the client's resolution. Strip the broken commands, drop
+# the redundant "Low Res Desktop" and gamescope-launch apps in place, idempotently,
+# so existing configs get fixed too. Fresh configs get the cleaned
+# /usr/share/hermes/apps.json template.
 sanitize_apps() {
     [ -f "${APPS_JSON}" ] || return 0
-    grep -Eq 'xrandr|steam://|hermes-gamescope-launch' "${APPS_JSON}" 2>/dev/null || return 0
+    grep -Eq 'xrandr|steam://|hermes-gamescope-launch|Low Res Desktop' "${APPS_JSON}" 2>/dev/null || return 0
     command -v jq >/dev/null 2>&1 || { warn "jq missing; leaving apps.json unchanged"; return 0; }
     local tmp; tmp="$(mktemp)"
     if jq '
@@ -550,10 +553,12 @@ sanitize_apps() {
               else . end )
             | ( if (has("detached") and (.detached | length == 0)) then del(.detached) else . end )
             | ( if (has("prep-cmd") and (.["prep-cmd"] | length == 0)) then del(.["prep-cmd"]) else . end );
-          .apps |= ( map(select((.cmd // "") != "hermes-gamescope-launch")) | map(clean) )
+          .apps |= ( map(select((.cmd // "") != "hermes-gamescope-launch"))
+                     | map(select(.name != "Low Res Desktop"))
+                     | map(clean) )
         ' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
         cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
-        log "sanitized apps.json (removed xrandr / root steam:// / gamescope-launch commands)"
+        log "sanitized apps.json (removed Low Res Desktop / xrandr / root steam:// / gamescope-launch)"
     else
         warn "could not sanitize apps.json (left unchanged)"
     fi
