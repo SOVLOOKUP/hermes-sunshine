@@ -173,6 +173,14 @@ RUN if [ "${INSTALL_STEAM}" = "true" ]; then set -eu; \
 #   47998-48000/udp : video/audio/control
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 
+# Liveness: the web UI (HTTPS, self-signed) answers on 47990 whenever hermes is
+# serving. `-k` skips cert verification and no `-f` is used, so any HTTP response
+# counts as healthy — we only fail when the connection is refused or times out
+# (hermes crashed/wedged), letting the restart policy recycle a dead container.
+# start-period covers the slow first boot (Steam bootstrap on the -steam image).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD curl -kso /dev/null --max-time 4 https://localhost:47990 || exit 1
+
 VOLUME ["/config"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

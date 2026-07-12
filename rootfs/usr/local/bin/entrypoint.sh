@@ -563,6 +563,13 @@ seed_config() {
     if [ "${KMS_ZEROCOPY}" = "true" ]; then
         ensure_conf_key headless_mode enabled
     fi
+    # Pin capture to the null-sink monitor we own ("hermes"). Otherwise Hermes
+    # auto-picks a default sink, which can drift to a client-created sink on
+    # reconnect and leave the stream silent; the watchdog always recreates
+    # "hermes" as the default, so hermes.monitor is the one stable source.
+    if [ "${START_PULSE}" = "true" ]; then
+        ensure_conf_key audio_sink hermes
+    fi
 }
 
 # --- sanitize the app list --------------------------------------------------
