@@ -383,27 +383,75 @@ start_compositor() {
 }
 
 # --- audio ------------------------------------------------------------------
+PULSE_ARGS=(--system --daemonize=true --disallow-exit=true
+    --exit-idle-time=-1 --log-target=stderr --realtime=false --high-priority=false)
+
+pulse_alive() {
+    # A crashed daemon leaves /run/pulse/native behind, so the socket existing
+    # proves nothing — it just answers new connections with "Connection refused".
+    # Probe the control protocol instead of stat-ing the socket or the pid.
+    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}" pactl info >/dev/null 2>&1
+}
+
+ensure_pulse_sink() {
+    # Idempotent: create the null sink Hermes captures (its .monitor is the audio
+    # source) and make it the default so apps render into it. Re-loading an
+    # existing module is a harmless no-op error.
+    pactl load-module module-null-sink \
+        sink_name=hermes sink_properties=device.description=Hermes-Virtual-Sink \
+        >/dev/null 2>&1 || true
+    pactl set-default-sink hermes >/dev/null 2>&1 || true
+}
+
 start_pulse() {
     log "starting PulseAudio (system mode) with a virtual sink"
-    pulseaudio --system --daemonize=true --disallow-exit=true \
-        --exit-idle-time=-1 --log-target=stderr \
-        --realtime=false --high-priority=false 2>/var/log/pulse.log \
+    pulseaudio "${PULSE_ARGS[@]}" 2>/var/log/pulse.log \
         || { warn "PulseAudio failed to start (see /var/log/pulse.log)"; return 1; }
 
     export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
     for _ in $(seq 1 20); do
-        pactl info >/dev/null 2>&1 && break
+        pulse_alive && break
         sleep 0.3
     done
-    if pactl info >/dev/null 2>&1; then
-        pactl load-module module-null-sink \
-            sink_name=hermes sink_properties=device.description=Hermes-Virtual-Sink \
-            >/dev/null 2>&1 || true
-        pactl set-default-sink hermes >/dev/null 2>&1 || true
+    if pulse_alive; then
+        ensure_pulse_sink
         log "virtual audio sink 'hermes' ready"
     else
         warn "PulseAudio control socket not reachable"
     fi
+}
+
+# PulseAudio has no supervisor here and the entrypoint execs into hermes, so once
+# the daemon dies nothing restarts it: the stream keeps video but loses sound
+# until the whole container is restarted (the stale socket lingers and only
+# answers "Connection refused"). Watch it in the background and, when the control
+# socket stops answering, clear the stale socket, respawn the daemon and rebuild
+# the sink so the next client gets audio without a container restart.
+start_pulse_watchdog() {
+    (
+        set +e
+        while :; do
+            sleep 5
+            pulse_alive && continue
+            warn "PulseAudio is unreachable; restarting it"
+            pkill -x pulseaudio 2>/dev/null
+            sleep 1
+            # Clear the whole stale runtime state, not just the socket: a leftover
+            # pid file makes a system-mode daemon refuse to start ("Daemon startup
+            # failed") even though nothing is listening.
+            rm -f /run/pulse/native /run/pulse/pid
+            pulseaudio "${PULSE_ARGS[@]}" 2>>/var/log/pulse.log
+            for _ in $(seq 1 20); do pulse_alive && break; sleep 0.3; done
+            if pulse_alive; then
+                ensure_pulse_sink
+                log "PulseAudio restarted; audio sink rebuilt"
+            else
+                warn "PulseAudio restart failed (see /var/log/pulse.log)"
+            fi
+        done
+    ) &
+    PIDS+=("$!")
+    log "pulse watchdog started"
 }
 
 # --- GPU access for the non-root steam user ---------------------------------
@@ -608,7 +656,7 @@ if [ "${START_COMPOSITOR}" = "true" ]; then
     start_udev || warn "continuing without udev (Hermes-KMS hotplug may not be seen)"
     start_compositor || warn "continuing without a Wayland session (capture will fail)"
 fi
-[ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; }
+[ "${START_PULSE}" = "true" ] && { start_pulse || warn "continuing without audio"; start_pulse_watchdog; }
 
 # Steam Big Picture per-session prep (only does anything on the …-steam image,
 # where steam + gamescope + the steam user exist). Needs the Wayland session and
