@@ -54,6 +54,17 @@ floating_modifier $mod normal
 
 bindsym $mod+Return exec $term
 bindsym $mod+d exec $menu
+
+# Super-free fallbacks. Moonlight clients (especially on Windows) usually let
+# the local OS swallow the Super/Meta key, so it never reaches sway and every
+# $mod shortcut above looks dead over the stream. Ctrl+Alt combos always
+# forward, so bind the terminal and launcher to them too, and auto-open a
+# terminal at startup so the streamed desktop is usable even before any
+# shortcut is pressed.
+bindsym Control+Alt+t exec $term
+bindsym Control+Alt+d exec $menu
+exec $term
+
 bindsym $mod+Shift+q kill
 bindsym $mod+Shift+c reload
 bindsym $mod+f fullscreen
