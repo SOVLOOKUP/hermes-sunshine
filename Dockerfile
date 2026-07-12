@@ -134,7 +134,7 @@ RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 
 # Runtime configs + entrypoint.
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
 
 # --- optional: Steam Big Picture variant ------------------------------------
 # Published as a parallel image tag (…-steam). When INSTALL_STEAM=true this

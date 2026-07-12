@@ -35,6 +35,12 @@ output "HEADLESS-1" position 7680 0
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 
+# Hermes replugs Virtual-1 on every app switch; while it is gone sway parks
+# focus on the off-screen HEADLESS-1 placeholder and never moves it back, so the
+# next app streams video from Virtual-1 but keyboard/mouse input goes off-screen.
+# This watcher snaps focus back to Virtual-1 whenever it reappears.
+exec_always /usr/local/bin/hermes-focus-watch
+
 # Export the session environment to the user D-Bus + systemd (best effort).
 exec_always dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null || true
 
