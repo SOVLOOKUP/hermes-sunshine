@@ -25,6 +25,40 @@ Sunshine. Clients: **Moonlight**, **Artemis**, or **Hestia**.
 > wlroots **headless** (software) output — usable for testing, but not the
 > low-latency path. XWayland is included for X11-only applications.
 
+## How it compares
+
+The popular ways to run a headless Steam/desktop over **Moonlight** are this
+image, **[Wolf](https://github.com/games-on-whales/wolf)** (Games-on-Whales), and
+**[steam-headless](https://github.com/Steam-Headless/docker-steam-headless)**.
+They aim at different trade-offs:
+
+|                       | **Hermes-Sunshine** (this image)                                   | **Wolf** (Games-on-Whales)                          | **steam-headless**                                    |
+| --------------------- | ------------------------------------------------------------------ | --------------------------------------------------- | ----------------------------------------------------- |
+| Display backend       | **Wayland** (sway/wlroots) on a real **KMS** virtual card          | **Wayland** (custom micro-compositor)               | **X11** (Xorg virtual output)                         |
+| Capture path          | **Zero-copy** DMA-BUF from the `hermes_kms` scanout into the encoder | Raw compositor framebuffer → GStreamer encode       | Sunshine grabs the X11 framebuffer                    |
+| Client resolution     | Rendered at the client's **negotiated native** res per session — no upscaling, no dummy plug | Adaptive per session                     | Fixed virtual output; adaptive res needs xrandr overlays |
+| Audio                 | **PipeWire** virtual sink                                          | PulseAudio (embedded / sidecar)                     | PulseAudio                                            |
+| Out of the box        | Boots into **Steam Big Picture** (console-like); desktop fallback  | Generic app runner — pick/define apps (Steam image incl.) | Full **Xfce desktop** + NoVNC browser access; launch Steam yourself |
+| Concurrency           | Single session                                                     | **Multiple** isolated sessions / users              | Single session                                        |
+| Configuration         | Stock **Sunshine web UI** (pair by PIN)                            | TOML file + Wolf UI app                             | Sunshine web UI + NoVNC                               |
+| Orchestration         | One self-contained container                                       | Spawns per-app containers — needs **`/var/run/docker.sock`** | One container                                 |
+| Main dependency       | **Host kernel module** (Hermes-KMS) for the low-latency path; auto software fallback otherwise | No kernel module          | No kernel module                                      |
+| Base image            | **CachyOS** (perf-tuned Arch)                                      | Ubuntu-based                                        | Debian + Xfce                                         |
+
+**Choose this image if** you want a Steam-console experience that streams a
+**true KMS scanout, zero-copy** into the GPU encoder at the client's native
+resolution, driven from the familiar Sunshine web UI, in a **single container
+that never touches your Docker socket**.
+
+**Consider [Wolf](https://github.com/games-on-whales/wolf) instead if** you need
+several people streaming different apps at once, or a solution that needs no host
+kernel module — at the cost of running per-app containers through the Docker
+socket.
+
+**Consider [steam-headless](https://github.com/Steam-Headless/docker-steam-headless)
+instead if** you mainly want a full, always-on Linux desktop you can also reach
+from a browser (NoVNC) and don't mind X11's resolution quirks.
+
 ## Contents
 
 ```
