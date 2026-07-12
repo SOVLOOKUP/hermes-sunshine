@@ -151,6 +151,7 @@ RUN if [ "${INSTALL_STEAM}" = "true" ]; then set -eu; \
     pacman -Syu --noconfirm --needed \
     steam \
     gamescope \
+    noto-fonts noto-fonts-cjk \
     vulkan-radeon lib32-vulkan-radeon \
     lib32-mesa \
     vulkan-icd-loader lib32-vulkan-icd-loader \
