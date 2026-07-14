@@ -42,6 +42,23 @@ install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
 
+log "checking for Virtual-1 output..."
+for _ in $(seq 1 20); do
+    if swaymsg -t get_outputs 2>/dev/null | grep -q '"name":"Virtual-1"'; then
+        log "Virtual-1 output detected"
+        break
+    fi
+    sleep 0.2
+done
+
+log "checking for existing steam/gamescope processes..."
+ps aux 2>/dev/null | grep -E '[s]team|[g]amescope' || log "no existing processes found"
+
+log "ensuring focus on Virtual-1..."
+swaymsg 'focus output Virtual-1' >/dev/null 2>&1 || true
+swaymsg 'workspace 1' >/dev/null 2>&1 || true
+
+log "starting gamescope..."
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
