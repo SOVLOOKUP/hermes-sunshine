@@ -42,8 +42,8 @@ install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
 
-log "checking for Virtual-1 output..."
-for _ in $(seq 1 20); do
+log "waiting for Virtual-1 output..."
+for _ in $(seq 1 60); do
     if swaymsg -t get_outputs 2>/dev/null | grep -q '"name":"Virtual-1"'; then
         log "Virtual-1 output detected"
         break
@@ -51,12 +51,20 @@ for _ in $(seq 1 20); do
     sleep 0.2
 done
 
-log "checking for existing steam/gamescope processes..."
-ps aux 2>/dev/null | grep -E '[s]team|[g]amescope' || log "no existing processes found"
-
 log "ensuring focus on Virtual-1..."
 swaymsg 'focus output Virtual-1' >/dev/null 2>&1 || true
 swaymsg 'workspace 1' >/dev/null 2>&1 || true
+
+log "re-applying gamescope window rule..."
+if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
+    swaymsg 'for_window [app_id="gamescope"] move container to output Virtual-1, fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+else
+    swaymsg 'for_window [app_id="gamescope"] fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+fi
+
+log "cleaning up leftover windows..."
+swaymsg 'kill [app_id="gamescope"]' >/dev/null 2>&1 || true
+sleep 0.2
 
 log "starting gamescope..."
 exec runuser -u steam -- env \
