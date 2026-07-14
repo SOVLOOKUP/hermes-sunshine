@@ -12,7 +12,6 @@ set -euo pipefail
 
 STEAM_LOG=/var/log/steam.log
 if [ -f "${STEAM_LOG}" ]; then
-    local log_size
     log_size="$(wc -c <"${STEAM_LOG}" 2>/dev/null || echo 0)"
     [ "${log_size}" -gt 5242880 ] && mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
 fi
