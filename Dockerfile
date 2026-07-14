@@ -39,6 +39,7 @@ RUN set -eu; \
 # Use BuildKit cache mount for pacman and cargo
 RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     --mount=type=cache,target=/root/.cargo,sharing=locked \
+    sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf && \
     pacman -Syu --noconfirm --needed rust
 
 COPY nm-fake/ /nm-fake/
@@ -89,6 +90,9 @@ RUN set -eu; \
 # Skip docs/manpages to reduce image size
 RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/share/info/* usr/share/gtk-doc/* usr/share/help/* usr/share/locale/* !usr/share/locale/locale.alias' /etc/pacman.conf
 
+# Disable CachyOS ALPM sandbox network (bubblewrap doesn't work in Docker)
+RUN sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf
+
 # Enable multilib for 32-bit libraries
 RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
@@ -119,7 +123,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     for g in video render audio input seat; do \
     getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
-    pacman -Scc --noconfirm; \
+    yes | pacman -Scc; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
 RUN setcap cap_sys_admin+p /usr/bin/hermes || true
