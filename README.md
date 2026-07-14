@@ -98,6 +98,18 @@ sudo modprobe hermes_kms initial_enabled=1
 ls -l /dev/dri                  # a new virtual card + render node appears
 ```
 
+To make the module load **automatically on system boot**:
+
+```bash
+# Create module auto-load configuration
+echo "hermes_kms" | sudo tee /etc/modules-load.d/hermes-kms.conf
+
+# Set default module parameters (initial_enabled=1 ensures the virtual display is ready at boot)
+echo "options hermes_kms initial_enabled=1" | sudo tee /etc/modprobe.d/hermes-kms.conf
+```
+
+Without this, the module must be reloaded manually after each reboot (`sudo modprobe hermes_kms initial_enabled=1`), otherwise the container will fall back to the slower headless (software) output.
+
 Then pass `/dev/dri` into the container (the compose file already does). The data
 flow is:
 

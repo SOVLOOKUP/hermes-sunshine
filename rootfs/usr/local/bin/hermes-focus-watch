@@ -14,6 +14,12 @@
 # output; without the mapping they spread across the whole layout, including the
 # off-screen placeholder, and taps land in dead space with the cursor stuck
 # mid-screen). Re-assert that mapping each time Virtual-1 reappears.
+#
+# Also constrain the mouse cursor to Virtual-1. The HEADLESS-1 placeholder is
+# positioned at x=7680, far outside the streamed output. Without constraint,
+# the cursor can drift into HEADLESS-1 (e.g., by moving beyond the right edge
+# of Virtual-1), and clicks there have no visible effect. This script monitors
+# cursor position and pulls it back into Virtual-1 whenever it strays out.
 set -euo pipefail
 
 remap_inputs() {
@@ -24,15 +30,35 @@ remap_inputs() {
 refocus() {
     local outs
     outs="$(swaymsg -t get_outputs 2>/dev/null)" || return 0
-    # Nothing to do until the streamed connector is actually present.
     printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1")' >/dev/null 2>&1 || return 0
     remap_inputs
-    # Already focused? leave it alone so we don't fight the compositor.
     printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1" and .focused)' >/dev/null 2>&1 && return 0
-    swaymsg 'focus output Virtual-1' >/dev/null 2>&1 || true
+    swaymsg 'workspace 1' >/dev/null 2>&1 || true
+}
+
+constrain_cursor() {
+    local outs w h cx cy
+    outs="$(swaymsg -t get_outputs 2>/dev/null)" || return 0
+    w="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .rect.width')" || return 0
+    h="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .rect.height')" || return 0
+    [ "${w}" = "null" ] && return 0
+    [ "${h}" = "null" ] && return 0
+    cx="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .cursor.x')" || return 0
+    cy="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .cursor.y')" || return 0
+    [ "${cx}" = "null" ] && return 0
+    [ "${cy}" = "null" ] && return 0
+    if [ "${cx}" -lt 0 ] || [ "${cx}" -ge "${w}" ] || [ "${cy}" -lt 0 ] || [ "${cy}" -ge "${h}" ]; then
+        local nx="${cx}" ny="${cy}"
+        [ "${nx}" -lt 0 ] && nx=0
+        [ "${nx}" -ge "${w}" ] && nx="$((w - 1))"
+        [ "${ny}" -lt 0 ] && ny=0
+        [ "${ny}" -ge "${h}" ] && ny="$((h - 1))"
+        swaymsg "move cursor to ${nx} ${ny}" >/dev/null 2>&1 || true
+    fi
 }
 
 refocus
-swaymsg -t subscribe -m '["output","workspace"]' 2>/dev/null | while read -r _; do
+swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
     refocus
+    constrain_cursor
 done

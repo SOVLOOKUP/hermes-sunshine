@@ -19,42 +19,51 @@
 
 ARG BASE_IMAGE=cachyos/cachyos:latest
 
+FROM ${BASE_IMAGE} AS builder
+
+ARG USE_CN_MIRROR=true
+
+RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
+    prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
+    { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
+    prepend /etc/pacman.d/mirrorlist \
+    'https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' \
+    'https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch'; \
+    prepend /etc/pacman.d/cachyos-mirrorlist \
+    'https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo' \
+    'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch/$repo'; \
+    fi
+
+RUN pacman -Syu --noconfirm --needed rust cargo
+
+COPY nm-fake/ /nm-fake/
+
+WORKDIR /nm-fake
+
+RUN cargo build --release
+
 FROM ${BASE_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="hermes-sunshine" \
     org.opencontainers.image.description="Dockerized Sunshine/Hermes game streaming host on CachyOS" \
     org.opencontainers.image.source="https://github.com/MrOz59/Hermes"
 
-# Hermes release to install: "latest" (default) or a specific tag such as "v0.4.0".
 ARG HERMES_REPO=MrOz59/Hermes
 ARG HERMES_REF=latest
-# Use fast China mirrors (USTC + Tsinghua) for pacman. Set to "false" when
-# building outside China (e.g. GitHub Actions) so the default global CDN is used.
 ARG USE_CN_MIRROR=true
 
 ENV LANG=C.UTF-8 \
     XDG_RUNTIME_DIR=/tmp/runtime \
     HOME=/config \
-    # Virtual display source: "auto" uses the host Hermes-KMS DRM card when
-    # present and otherwise falls back to a wlroots headless (software) output.
-    # Force with "on" / "off".
     HERMES_KMS=auto \
-    # Virtual output geometry
     DISPLAY_WIDTH=1920 \
     DISPLAY_HEIGHT=1080 \
     DISPLAY_REFRESH=60 \
-    # Feature toggles handled by the entrypoint
     START_COMPOSITOR=true \
     START_PIPEWIRE=true \
     START_AVAHI=true \
     ENABLE_XWAYLAND=true
-# TZ is intentionally left unset: with no explicit TZ the entrypoint follows
-# /etc/localtime (bind-mount it from the host to inherit the user's timezone).
 
-# Point pacman at China mirrors (USTC primary, Tsinghua secondary) when enabled.
-# The original mirrors are kept as fallback. $repo/$arch/$arch_v3 are pacman
-# variables and MUST stay literal, hence the single quotes. `prepend` only
-# touches files that exist, so it works across CachyOS base image variants.
 RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
     prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
     { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
@@ -69,21 +78,8 @@ RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
     'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch_v3/$repo'; \
     fi
 
-# Trim the install size: never extract man pages, texinfo, docs, gtk-doc, help
-# pages, or app locale (.mo) files for the packages installed below. The
-# container runs in C.UTF-8 with no doc/man reader, so these are pure weight.
-# (locale.alias is kept for the few libs that read it.)
 RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/share/info/* usr/share/gtk-doc/* usr/share/help/* usr/share/locale/* !usr/share/locale/locale.alias' /etc/pacman.conf
 
-# Download the prebuilt Hermes Arch package from GitHub releases and install it
-# with `pacman -U` (which resolves + installs its runtime deps from the repos),
-# then add the headless Wayland session stack (sway/wlroots, PipeWire, dbus,
-# avahi, Mesa/VAAPI, XWayland) plus the clipboard tools Hermes shells out to
-# (wl-clipboard's wl-copy/wl-paste on Wayland, xclip on X11).
-#
-# We resolve the release WITHOUT the GitHub REST API (it 403s for unauthenticated
-# datacenter IPs). "latest" is resolved via the /releases/latest redirect, and
-# the exact asset URL is scraped from the /releases/expanded_assets/<tag> HTML.
 RUN pacman -Syu --noconfirm --needed curl \
     && ref="${HERMES_REF}" \
     && if [ "${ref}" = "latest" ]; then \
@@ -118,32 +114,16 @@ RUN pacman -Syu --noconfirm --needed curl \
     && pacman -Scc --noconfirm \
     && rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
-# The avahi daemon drops privileges to a dedicated system user that Arch normally
-# creates via systemd-sysusers — which does not run during an image build. Create
-# it here so avahi can start. PipeWire needs no such user: the entrypoint runs the
-# whole stack (pipewire / wireplumber / pipewire-pulse) as root with a shared
-# runtime dir, so there is no system daemon to drop privileges for.
 RUN useradd --system --user-group --home-dir / \
     --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true
 
-# KMS/DRM capture path needs CAP_SYS_ADMIN; grant it as a file capability
-# (mirrors hermes.install do_setcap). Requires --cap-add=SYS_ADMIN at runtime.
 RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 
-# Runtime configs + entrypoint.
-COPY rootfs/ /
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
+COPY --from=builder /nm-fake/target/release/hermes-nm-fake /usr/local/bin/hermes-nm-fake
 
-# --- Steam Big Picture -------------------------------------------------------
-# This image is built around the Steam experience: enable the [multilib] repo,
-# install Steam + gamescope and the 32-bit AMD graphics stack, and create a
-# dedicated non-root "steam" user — Steam refuses to run as root and its
-# container runtime (pressure-vessel) misbehaves as root. The entrypoint
-# registers "Steam Big Picture" as a per-session Hermes app: when a client
-# streams it, Hermes runs the launcher at the client's negotiated resolution
-# (toggle with AUTOSTART_STEAM). lib32-libpulse is Steam's 32-bit audio client;
-# it talks to the PipeWire pulse-compat socket. The `sed` uncomments the
-# [multilib] block (a no-op if it is already enabled).
+COPY rootfs/ /
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch /usr/local/bin/hermes-nm-fake
+
 RUN set -eu; \
     sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf; \
     pacman -Syu --noconfirm --needed \
@@ -163,17 +143,8 @@ RUN set -eu; \
     pacman -Scc --noconfirm; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
-# Sunshine/Moonlight ports:
-#   47984-47990/tcp : RTSP, control, web UI (47990)
-#   48010/tcp       : RTSP
-#   47998-48000/udp : video/audio/control
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 
-# Liveness: the web UI (HTTPS, self-signed) answers on 47990 whenever hermes is
-# serving. `-k` skips cert verification and no `-f` is used, so any HTTP response
-# counts as healthy — we only fail when the connection is refused or times out
-# (hermes crashed/wedged), letting the restart policy recycle a dead container.
-# start-period covers the slow first boot (Steam's first-run bootstrap).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -kso /dev/null --max-time 4 https://localhost:47990 || exit 1
 

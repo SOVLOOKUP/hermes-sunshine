@@ -1,12 +1,36 @@
-# Runtime state created by the docker-compose bind mount (config, paired
-# clients, app list, TLS certs, logs) — never commit it.
 /config/
 
-# Build logs / artifacts.
 *.log
 
-# OS / editor cruft.
 .DS_Store
 Thumbs.db
 *.swp
 *.txt
+
+nm-fake/target/
+nm-fake/Cargo.lock
+
+/.env
+/.env.local
+
+*.tar
+*.tar.gz
+*.tar.zst
+*.zip
+*.rpm
+*.deb
+
+/.idea/
+/.vscode/
+*.iml
+*.ipr
+*.iws
+
+*~
+\#*\#
+.\#*
+*.bak
+*.tmp
+
+
+nm-fake/target/
