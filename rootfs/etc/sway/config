@@ -27,11 +27,17 @@ font pango:monospace 10
 # comes up first and would otherwise own workspace 1 and the focus, leaving the
 # streamed Virtual-1 on an empty secondary workspace — a black screen. Pin the
 # primary workspace to Virtual-1 (falling back to the placeholder only when it
-# is absent) and park the placeholder off to the side so new windows and the
-# cursor land on the output that is actually streamed. The solid background
-# makes an idle desktop show a visible colour instead of pure black.
+# is absent) and park the placeholder as a 1x1 pixel at the bottom-right corner
+# of Virtual-1 so new windows and the cursor land on the output that is actually
+# streamed. The solid background makes an idle desktop show a visible colour
+# instead of pure black.
+#
+# The HEADLESS-1 placeholder is resized and repositioned by hermes-focus-watch
+# when Virtual-1 appears, keeping it at exactly 1x1 pixel at Virtual-1's
+# bottom-right corner. This minimizes the area where mouse cursor can stray
+# outside the streamed output.
 output "Virtual-1" position 0 0
-output "HEADLESS-1" position 1000000 0
+output "HEADLESS-1" position 0 0
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 

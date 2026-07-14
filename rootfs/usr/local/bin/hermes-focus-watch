@@ -38,6 +38,14 @@ remap_inputs() {
     swaymsg 'input type:tablet_tool map_to_output Virtual-1' >/dev/null 2>&1 || true
 }
 
+resize_placeholder() {
+    local w h
+    w="$1"
+    h="$2"
+    swaymsg 'output HEADLESS-1 resolution 1x1' >/dev/null 2>&1 || true
+    swaymsg "output HEADLESS-1 position ${w} ${h}" >/dev/null 2>&1 || true
+}
+
 process_event() {
     local info exists focused w h cx cy
     info="$(get_virtual1_info)"
@@ -47,6 +55,10 @@ process_event() {
     [ "${exists}" = "true" ] || return 0
     
     remap_inputs
+    
+    if [ "${w}" != "null" ] && [ "${h}" != "null" ]; then
+        resize_placeholder "${w}" "${h}"
+    fi
     
     if [ "${focused}" != "true" ]; then
         swaymsg 'workspace 1' >/dev/null 2>&1 || true
