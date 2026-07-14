@@ -17,7 +17,7 @@
 # a for_window rule (see the entrypoint), so the streamed game is unaffected.
 default_border pixel 2
 default_floating_border pixel 2
-seat * hide_cursor 5000
+seat * hide_cursor 0
 focus_follows_mouse no
 font pango:monospace 10
 

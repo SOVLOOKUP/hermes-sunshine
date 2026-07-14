@@ -81,4 +81,9 @@ process_event() {
 process_event
 swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
     process_event
+done &
+
+while true; do
+    sleep 0.1
+    process_event
 done
