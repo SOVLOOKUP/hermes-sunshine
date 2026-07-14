@@ -37,7 +37,7 @@ font pango:monospace 10
 # bottom-right corner. This minimizes the area where mouse cursor can stray
 # outside the streamed output.
 output "Virtual-1" position 0 0
-output "HEADLESS-1" position 0 0
+output "HEADLESS-1" position 999999 0
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 
