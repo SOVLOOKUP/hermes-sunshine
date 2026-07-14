@@ -55,11 +55,45 @@ log "launching Steam Big Picture at ${W}x${H}@${R} as user 'steam'"
 runtime="/run/user/$(id -u steam)"
 sockpath="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 
-# Belt-and-suspenders: re-open the socket to the steam user in case a fresh sway
-# socket appeared after boot (idempotent, no-op when prepare_steam already did it).
 install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
+
+if [ ! -S "${sockpath}" ]; then
+    warn "Wayland socket not found: ${sockpath}"
+    exit 1
+fi
+
+if ! su -s /bin/bash steam -c "test -r ${sockpath} && test -w ${sockpath}"; then
+    warn "steam user cannot access Wayland socket: ${sockpath}"
+    exit 1
+fi
+
+log "Wayland socket ready: ${sockpath}"
+
+log "waiting for Virtual-1 output..."
+for _ in $(seq 1 60); do
+    if swaymsg -t get_outputs 2>/dev/null | grep -q '"name":"Virtual-1"'; then
+        log "Virtual-1 output detected"
+        break
+    fi
+    sleep 0.5
+done
+
+log "ensuring focus on Virtual-1..."
+swaymsg 'focus output Virtual-1' >/dev/null 2>&1 || true
+swaymsg 'workspace 1' >/dev/null 2>&1 || true
+
+log "re-applying gamescope window rule..."
+if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
+    swaymsg 'for_window [app_id="gamescope"] move container to output Virtual-1, fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+else
+    swaymsg 'for_window [app_id="gamescope"] fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+fi
+
+log "cleaning up any leftover gamescope windows..."
+swaymsg 'kill [app_id="gamescope"]' >/dev/null 2>&1 || true
+sleep 0.5
 
 # Keep gamescope's primary child alive across Steam's own restarts. Steam
 # re-execs itself after the first-run bootstrap ("Setting up Steam content") and
