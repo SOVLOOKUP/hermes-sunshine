@@ -41,12 +41,16 @@ install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
 
+TZ_VAL="${TZ:-}"
+[ -z "${TZ_VAL}" ] && [ -f /etc/timezone ] && TZ_VAL="$(cat /etc/timezone 2>/dev/null)"
+
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
+    TZ="${TZ_VAL}" \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
     bash -c '
         delay=2; max=60
