@@ -66,33 +66,7 @@ process_event() {
     fi
 }
 
-constrain_loop() {
-    while true; do
-        local info exists w h cx cy
-        info="$(get_virtual1_info)"
-        IFS='|' read -r exists _ w h cx cy <<< "${info}"
-        
-        [ "${exists}" = "true" ] || { sleep 0.1; continue; }
-        
-        if [ "${w}" != "null" ] && [ "${h}" != "null" ] && \
-           [ "${cx}" != "null" ] && [ "${cy}" != "null" ]; then
-            if [ "${cx}" -lt 0 ] || [ "${cx}" -ge "${w}" ] || \
-               [ "${cy}" -lt 0 ] || [ "${cy}" -ge "${h}" ]; then
-                local nx="${cx}" ny="${cy}"
-                [ "${nx}" -lt 0 ] && nx=0
-                [ "${nx}" -ge "${w}" ] && nx="$((w - 1))"
-                [ "${ny}" -lt 0 ] && ny=0
-                [ "${ny}" -ge "${h}" ] && ny="$((h - 1))"
-                swaymsg "move cursor to ${nx} ${ny}" >/dev/null 2>&1 || true
-            fi
-        fi
-        
-        sleep 0.05
-    done
-}
-
 process_event
-constrain_loop &
 swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
     process_event
 done

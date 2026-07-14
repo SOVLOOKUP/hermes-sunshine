@@ -31,7 +31,7 @@ font pango:monospace 10
 # cursor land on the output that is actually streamed. The solid background
 # makes an idle desktop show a visible colour instead of pure black.
 output "Virtual-1" position 0 0
-output "HEADLESS-1" position 7680 0
+output "HEADLESS-1" position 1000000 0
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 
