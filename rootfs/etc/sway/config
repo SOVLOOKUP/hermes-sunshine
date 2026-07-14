@@ -32,10 +32,9 @@ font pango:monospace 10
 # streamed. The solid background makes an idle desktop show a visible colour
 # instead of pure black.
 #
-# The HEADLESS-1 placeholder is resized and repositioned by hermes-focus-watch
-# when Virtual-1 appears, keeping it at exactly 1x1 pixel at Virtual-1's
-# bottom-right corner. This minimizes the area where mouse cursor can stray
-# outside the streamed output.
+# HEADLESS-1 is parked as a 1x1 pixel far from Virtual-1 so it doesn't overlap
+# the streamed output. hermes-focus-watch snaps focus back to Virtual-1 when it
+# reappears after a replug.
 output "Virtual-1" position 0 0
 output "HEADLESS-1" position 999999 0 resolution 1x1
 workspace 1 output "Virtual-1" "HEADLESS-1"
@@ -44,8 +43,8 @@ output * bg #202020 solid_color
 # --- absolute input mapping -------------------------------------------------
 # Touch and pen input Moonlight injects carry coordinates normalised to the
 # streamed output. By default sway spreads absolute input across the whole
-# output layout, which here includes the off-screen HEADLESS-1 placeholder at
-# x=7680 — so taps land in dead space instead of on the picture. Pin the
+# output layout, which here includes the off-screen HEADLESS-1 placeholder
+# far to the right — so taps land in dead space instead of on the picture. Pin the
 # absolute-only devices (touch, tablet/pen) to the captured Virtual-1 output so
 # their coordinates map 1:1 onto what the client sees. Do NOT map type:pointer:
 # that wildcard also catches the relative mouse and breaks cursor rendering. On
