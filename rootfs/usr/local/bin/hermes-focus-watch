@@ -42,7 +42,7 @@ resize_placeholder() {
     local w h
     w="$1"
     h="$2"
-    swaymsg 'output HEADLESS-1 resolution 1x1' >/dev/null 2>&1 || true
+    swaymsg 'output HEADLESS-1 resolution 0x0' >/dev/null 2>&1 || true
     swaymsg "output HEADLESS-1 position ${w} ${h}" >/dev/null 2>&1 || true
 }
 
