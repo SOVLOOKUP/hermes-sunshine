@@ -39,7 +39,7 @@ RUN set -eu; \
 # Use BuildKit cache mount for pacman and cargo
 RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     --mount=type=cache,target=/root/.cargo,sharing=locked \
-    pacman -Syu --noconfirm --needed rust cargo
+    pacman -Syu --noconfirm --needed rust
 
 COPY nm-fake/ /nm-fake/
 
@@ -93,8 +93,9 @@ RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/shar
 RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
 # Install all packages in a single layer with BuildKit cache mounts
-RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
+RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     set -eu; \
+    pacman -Sy --noconfirm; \
     ref="${HERMES_REF}"; \
     if [ "${ref}" = "latest" ]; then \
     ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
@@ -106,7 +107,7 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     curl -fL --retry 3 -o /tmp/hermes.pkg.tar.zst "https://github.com${path}"; \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
-    pacman -Syu --noconfirm --needed \
+    pacman -S --noconfirm --needed \
     curl libva-utils dbus mesa sway seatd wlr-randr xorg-xwayland \
     wl-clipboard xclip foot wofi jq \
     pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
