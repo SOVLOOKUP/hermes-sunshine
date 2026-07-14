@@ -19,36 +19,6 @@
 
 ARG BASE_IMAGE=cachyos/cachyos:latest
 
-FROM ${BASE_IMAGE} AS builder
-
-ARG USE_CN_MIRROR=true
-
-# Shared mirror configuration function
-RUN set -eu; \
-    if [ "${USE_CN_MIRROR}" = "true" ]; then \
-    prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
-    { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
-    prepend /etc/pacman.d/mirrorlist \
-    'https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' \
-    'https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch'; \
-    prepend /etc/pacman.d/cachyos-mirrorlist \
-    'https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo' \
-    'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch/$repo'; \
-    fi
-
-# Use BuildKit cache mount for pacman and cargo
-RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
-    --mount=type=cache,target=/root/.cargo,sharing=locked \
-    sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf && \
-    pacman -Syu --noconfirm --needed rust
-
-COPY nm-fake/ /nm-fake/
-
-WORKDIR /nm-fake
-
-RUN --mount=type=cache,target=/root/.cargo,sharing=locked \
-    cargo build --release
-
 FROM ${BASE_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="hermes-sunshine" \
@@ -128,10 +98,8 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
 
 RUN setcap cap_sys_admin+p /usr/bin/hermes || true; setcap cap_sys_admin+ep /usr/bin/sway || true
 
-COPY --from=builder /nm-fake/target/release/hermes-nm-fake /usr/local/bin/hermes-nm-fake
-
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch /usr/local/bin/hermes-nm-fake
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
 
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 

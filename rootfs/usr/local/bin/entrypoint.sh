@@ -54,19 +54,6 @@ start_dbus() {
     fi
 }
 
-# --- fake NetworkManager (for Steam connectivity check) ---------------------
-# Steam queries NetworkManager via D-Bus for connectivity state. Without it,
-# Steam shows "no valid network" even though networking works fine. This fake
-# service responds with "full connectivity" to satisfy Steam's check.
-start_fake_nm() {
-    if [ ! -x /usr/local/bin/hermes-nm-fake ]; then
-        return 0
-    fi
-    /usr/local/bin/hermes-nm-fake >/var/log/nm-fake.log 2>&1 &
-    PIDS+=("$!")
-    log "fake NetworkManager started (suppresses Steam's 'no valid network' UI)"
-}
-
 # --- mDNS discovery (Moonlight auto-discovery) ------------------------------
 start_avahi() {
     avahi-daemon --no-chroot -D 2>/dev/null \
@@ -715,7 +702,6 @@ configure_steam_app() {
 
 # --- bring up the session ---------------------------------------------------
 start_dbus
-start_fake_nm
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
 if [ "${START_COMPOSITOR}" = "true" ]; then
     detect_devices
