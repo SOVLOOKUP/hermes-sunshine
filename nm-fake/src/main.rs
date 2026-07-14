@@ -7,6 +7,7 @@ const OBJECT_PATH: &str = "/org/freedesktop/NetworkManager";
 const ACTIVE_CONNECTION_PATH: &str = "/org/freedesktop/NetworkManager/ActiveConnection/0";
 const IP4_CONFIG_PATH: &str = "/org/freedesktop/NetworkManager/IP4Config/0";
 const IP6_CONFIG_PATH: &str = "/org/freedesktop/NetworkManager/IP6Config/0";
+const WIRED_DEVICE_PATH: &str = "/org/freedesktop/NetworkManager/Devices/0";
 
 struct NetworkManager;
 
@@ -46,6 +47,10 @@ impl NetworkManager {
 
     fn connectivity(&self) -> u32 {
         4
+    }
+
+    fn devices(&self) -> Vec<ObjectPath<'_>> {
+        vec![ObjectPath::try_from(WIRED_DEVICE_PATH).unwrap()]
     }
 }
 
@@ -184,6 +189,47 @@ impl IP6Config {
     }
 }
 
+struct WiredDevice;
+
+#[interface(name = "org.freedesktop.NetworkManager.Device")]
+impl WiredDevice {
+    fn ip4_addresses(&self) -> Vec<(u32, u32, ObjectPath<'_>)> {
+        Vec::new()
+    }
+
+    fn ip4_config(&self) -> ObjectPath<'_> {
+        ObjectPath::try_from(IP4_CONFIG_PATH).unwrap()
+    }
+
+    fn ip6_addresses(&self) -> Vec<(Vec<u8>, u32, i32, ObjectPath<'_>)> {
+        Vec::new()
+    }
+
+    fn ip6_config(&self) -> ObjectPath<'_> {
+        ObjectPath::try_from(IP6_CONFIG_PATH).unwrap()
+    }
+
+    fn managed(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "eth0"
+    }
+
+    fn state(&self) -> u32 {
+        100
+    }
+
+    fn type_(&self) -> u32 {
+        1
+    }
+
+    fn active_connection(&self) -> ObjectPath<'_> {
+        ObjectPath::try_from(ACTIVE_CONNECTION_PATH).unwrap()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let _conn = connection::Builder::system()?
@@ -192,6 +238,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .serve_at(ACTIVE_CONNECTION_PATH, ActiveConnection)?
         .serve_at(IP4_CONFIG_PATH, IP4Config)?
         .serve_at(IP6_CONFIG_PATH, IP6Config)?
+        .serve_at(WIRED_DEVICE_PATH, WiredDevice)?
         .build()
         .await?;
 
