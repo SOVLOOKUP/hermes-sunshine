@@ -33,6 +33,6 @@ refocus() {
 }
 
 refocus
-swaymsg -t subscribe -m '["output","workspace"]' 2>/dev/null | while read -r _; do
+swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
     refocus
 done
