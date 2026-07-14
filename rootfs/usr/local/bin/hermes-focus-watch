@@ -22,24 +22,20 @@
 # cursor position and pulls it back into Virtual-1 whenever it strays out.
 set -euo pipefail
 
-exec 2>/var/log/hermes-focus-watch.log
-echo "=== $(date '+%F %T %Z') ==="
-
 last_w=""
 last_h=""
 last_exists="false"
 
 get_virtual1_info() {
     local outs
-    outs="$(swaymsg -t get_outputs 2>/dev/null)" || { echo "false|||||"; return 0; }
+    outs="$(swaymsg -t get_outputs 2>/dev/null)" || { echo "false|||"; return 0; }
     printf '%s' "${outs}" | jq -r '
         .[] | select(.name=="Virtual-1") |
-        "true|\(.focused)|\(.rect.width)|\(.rect.height)|\(.cursor.x)|\(.cursor.y)"
-    ' 2>/dev/null || echo "false|||||"
+        "true|\(.focused)|\(.rect.width)|\(.rect.height)"
+    ' 2>/dev/null || echo "false|||"
 }
 
 remap_inputs() {
-    echo "$(date '+%T'): remapping inputs"
     swaymsg 'input type:touch map_to_output Virtual-1' >/dev/null 2>&1 || true
     swaymsg 'input type:tablet_tool map_to_output Virtual-1' >/dev/null 2>&1 || true
 }
@@ -48,22 +44,18 @@ resize_placeholder() {
     local w h
     w="$1"
     h="$2"
-    echo "$(date '+%T'): resizing placeholder to 1x1 at ${w},${h}"
     swaymsg 'output HEADLESS-1 resolution 1x1' >/dev/null 2>&1 || true
     swaymsg "output HEADLESS-1 position ${w} ${h}" >/dev/null 2>&1 || true
 }
 
 process_event() {
-    local info exists focused w h cx cy
+    local info exists focused w h
     info="$(get_virtual1_info)"
     
-    IFS='|' read -r exists focused w h cx cy <<< "${info}"
-    
-    echo "$(date '+%T'): process_event - exists=${exists} focused=${focused} w=${w} h=${h} cx=${cx} cy=${cy}"
+    IFS='|' read -r exists focused w h <<< "${info}"
     
     if [ "${exists}" != "true" ]; then
         last_exists="false"
-        echo "$(date '+%T'): Virtual-1 not found, resetting state"
         return 0
     fi
     
@@ -75,26 +67,10 @@ process_event() {
             last_h="${h}"
         fi
         last_exists="true"
-        echo "$(date '+%T'): Virtual-1 appeared, state updated"
     fi
     
     if [ "${focused}" != "true" ]; then
-        echo "$(date '+%T'): Virtual-1 not focused, switching to workspace 1"
         swaymsg 'workspace 1' >/dev/null 2>&1 || true
-    fi
-    
-    if [ "${w}" != "null" ] && [ "${h}" != "null" ] && \
-       [ "${cx}" != "null" ] && [ "${cy}" != "null" ]; then
-        if [ "${cx}" -lt 0 ] || [ "${cx}" -ge "${w}" ] || \
-           [ "${cy}" -lt 0 ] || [ "${cy}" -ge "${h}" ]; then
-            local nx="${cx}" ny="${cy}"
-            [ "${nx}" -lt 0 ] && nx=0
-            [ "${nx}" -ge "${w}" ] && nx="$((w - 1))"
-            [ "${ny}" -lt 0 ] && ny=0
-            [ "${ny}" -ge "${h}" ] && ny="$((h - 1))"
-            echo "$(date '+%T'): cursor out of bounds (${cx},${cy}), moving to (${nx},${ny})"
-            swaymsg "move cursor to ${nx} ${ny}" >/dev/null 2>&1 || true
-        fi
     fi
 }
 
