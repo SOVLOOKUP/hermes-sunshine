@@ -67,6 +67,25 @@ impl NetworkManager {
     fn primary_connection_type(&self) -> &str {
         "802-3-ethernet"
     }
+
+    #[zbus(property)]
+    fn metered(&self) -> u32 {
+        4 // NM_METERED_NO
+    }
+
+    // --- D-Bus methods (Steam may call these instead of reading properties) ---
+
+    fn check_connectivity(&self) -> u32 {
+        4 // NM_CONNECTIVITY_FULL
+    }
+
+    fn get_devices(&self) -> Vec<ObjectPath<'_>> {
+        vec![ObjectPath::try_from(WIRED_DEVICE_PATH).unwrap()]
+    }
+
+    fn get_active_connections(&self) -> Vec<ObjectPath<'_>> {
+        vec![ObjectPath::try_from(ACTIVE_CONNECTION_PATH).unwrap()]
+    }
 }
 
 struct ActiveConnection;

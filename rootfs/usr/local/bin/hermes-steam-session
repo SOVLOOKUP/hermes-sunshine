@@ -43,14 +43,18 @@ chmod o+rw "${sockpath}" 2>/dev/null || true
 
 TZ_VAL="${TZ:-}"
 [ -z "${TZ_VAL}" ] && [ -f /etc/timezone ] && TZ_VAL="$(cat /etc/timezone 2>/dev/null)"
+[ -z "${TZ_VAL}" ] && [ -L /etc/localtime ] && TZ_VAL="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
+
+TZ_ENV=()
+[ -n "${TZ_VAL}" ] && TZ_ENV=(TZ="${TZ_VAL}")
 
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
-    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
+    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse-native}" \
     XDG_CURRENT_DESKTOP=gamescope \
-    TZ="${TZ_VAL}" \
+    "${TZ_ENV[@]}" \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
     bash -c '
         delay=2; max=60
