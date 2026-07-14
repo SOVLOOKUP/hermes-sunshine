@@ -586,13 +586,11 @@ seed_config() {
     ensure_conf_key address_family both
     ensure_conf_key upnp enabled
     ensure_conf_key system_tray disabled
-    ensure_conf_key virtual_display_backend hermes_kms
-    # headless_mode makes Hermes create a per-session HERMES-1 virtual display —
-    # the zero-copy capture target on the Hermes-KMS card. Only enable it when
-    # that card is actually driving sway; on the software headless fallback there
-    # is no backend to create the display, so the session would fail instead.
     if [ "${KMS_ZEROCOPY}" = "true" ]; then
+        ensure_conf_key virtual_display_backend hermes_kms
         ensure_conf_key headless_mode enabled
+    else
+        ensure_conf_key virtual_display_backend headless
     fi
     # Audio: let Hermes fully own its loopback sinks. It creates
     # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
