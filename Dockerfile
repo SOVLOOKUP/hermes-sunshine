@@ -95,7 +95,6 @@ RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 # Install all packages in a single layer with BuildKit cache mounts
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     set -eu; \
-    # Download and install Hermes
     ref="${HERMES_REF}"; \
     if [ "${ref}" = "latest" ]; then \
     ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
@@ -107,22 +106,18 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
     curl -fL --retry 3 -o /tmp/hermes.pkg.tar.zst "https://github.com${path}"; \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
-    # Install base runtime packages
     pacman -Syu --noconfirm --needed \
     curl libva-utils dbus mesa sway seatd wlr-randr xorg-xwayland \
     wl-clipboard xclip foot wofi jq \
     pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
-    # Install Steam and GPU packages (multilib enabled above)
     steam gamescope noto-fonts noto-fonts-cjk \
     vulkan-radeon lib32-vulkan-radeon lib32-mesa \
     vulkan-icd-loader lib32-vulkan-icd-loader lib32-libva-mesa-driver lib32-libpulse; \
-    # Create users
     useradd --system --user-group --home-dir / --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true; \
     useradd --uid 1000 --user-group --create-home --home-dir /home/steam --shell /bin/bash steam; \
     for g in video render audio input seat; do \
     getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
-    # Cleanup
     pacman -Scc --noconfirm; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
