@@ -580,6 +580,17 @@ ensure_conf_key() {
     fi
 }
 
+set_conf_key() {
+    local key="$1" val="$2"
+    if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "${HERMES_CONFIG}" 2>/dev/null; then
+        sed -i -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*.*/${key} = ${val}/" "${HERMES_CONFIG}"
+        log "config: updated ${key} = ${val}"
+    else
+        printf '%s = %s\n' "${key}" "${val}" >> "${HERMES_CONFIG}"
+        log "config: added ${key} = ${val}"
+    fi
+}
+
 seed_config() {
     mkdir -p "$(dirname "${HERMES_CONFIG}")"
     touch "${HERMES_CONFIG}"
@@ -587,10 +598,11 @@ seed_config() {
     ensure_conf_key upnp enabled
     ensure_conf_key system_tray disabled
     if [ "${KMS_ZEROCOPY}" = "true" ]; then
-        ensure_conf_key virtual_display_backend hermes_kms
-        ensure_conf_key headless_mode enabled
+        set_conf_key virtual_display_backend hermes_kms
+        set_conf_key headless_mode enabled
     else
-        ensure_conf_key virtual_display_backend headless
+        set_conf_key virtual_display_backend headless
+        set_conf_key headless_mode disabled
     fi
     # Audio: let Hermes fully own its loopback sinks. It creates
     # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
