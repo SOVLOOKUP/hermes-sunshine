@@ -75,8 +75,6 @@ services:
 
     volumes:
       - ./config:/config
-      # Follow the host timezone automatically (read-only).
-      - /etc/localtime:/etc/localtime:ro
       # Share only the input subtree (not all of /dev) so the evdev nodes Hermes
       # hotplugs for the virtual gamepad appear live in the container.
       - /dev/input:/dev/input
@@ -85,7 +83,7 @@ services:
 
     # Override any of the defaults here. Uncomment the whole block to use it.
     # environment:
-    #   TZ: Asia/Shanghai        # force a timezone instead of following the host
+    #   TZ: Asia/Shanghai        # set your timezone (required for correct Steam time)
     #   HERMES_KMS: auto         # virtual display: auto | on | off
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"

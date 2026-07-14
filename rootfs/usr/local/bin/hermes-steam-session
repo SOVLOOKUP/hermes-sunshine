@@ -41,21 +41,8 @@ install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
 
-TZ_VAL="${TZ:-}"
-[ -z "${TZ_VAL}" ] && [ -f /etc/timezone ] && TZ_VAL="$(cat /etc/timezone 2>/dev/null)"
-[ -z "${TZ_VAL}" ] && [ -L /etc/localtime ] && TZ_VAL="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
-# Fallback: derive POSIX TZ from system offset (invert sign: +0800 → UTC-8)
-if [ -z "${TZ_VAL}" ]; then
-    offset="$(date +%z 2>/dev/null || true)"
-    if [ -n "${offset}" ]; then
-        sign="${offset:0:1}"
-        hours="${offset:1:2}"
-        [ "${sign}" = "+" ] && TZ_VAL="UTC-${hours}" || TZ_VAL="UTC+${hours}"
-    fi
-fi
-
 TZ_ENV=()
-[ -n "${TZ_VAL}" ] && TZ_ENV=(TZ="${TZ_VAL}")
+[ -n "${TZ:-}" ] && TZ_ENV=(TZ="${TZ}")
 
 exec runuser -u steam -- env \
     HOME=/config/steam \
