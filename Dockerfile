@@ -23,7 +23,9 @@ FROM ${BASE_IMAGE} AS builder
 
 ARG USE_CN_MIRROR=true
 
-RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
+# Shared mirror configuration function
+RUN set -eu; \
+    if [ "${USE_CN_MIRROR}" = "true" ]; then \
     prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
     { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
     prepend /etc/pacman.d/mirrorlist \
@@ -34,13 +36,17 @@ RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
     'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch/$repo'; \
     fi
 
-RUN pacman -Syu --noconfirm --needed rust cargo
+# Use BuildKit cache mount for pacman and cargo
+RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
+    --mount=type=cache,target=/root/.cargo,sharing=locked \
+    pacman -Syu --noconfirm --needed rust cargo
 
 COPY nm-fake/ /nm-fake/
 
 WORKDIR /nm-fake
 
-RUN cargo build --release
+RUN --mount=type=cache,target=/root/.cargo,sharing=locked \
+    cargo build --release
 
 FROM ${BASE_IMAGE} AS runtime
 
@@ -64,7 +70,9 @@ ENV LANG=C.UTF-8 \
     START_AVAHI=true \
     ENABLE_XWAYLAND=true
 
-RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
+# Configure mirrors for runtime stage (includes cachyos-v3-mirrorlist)
+RUN set -eu; \
+    if [ "${USE_CN_MIRROR}" = "true" ]; then \
     prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
     { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
     prepend /etc/pacman.d/mirrorlist \
@@ -78,44 +86,45 @@ RUN if [ "${USE_CN_MIRROR}" = "true" ]; then set -eu; \
     'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch_v3/$repo'; \
     fi
 
+# Skip docs/manpages to reduce image size
 RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/share/info/* usr/share/gtk-doc/* usr/share/help/* usr/share/locale/* !usr/share/locale/locale.alias' /etc/pacman.conf
 
-RUN pacman -Syu --noconfirm --needed curl \
-    && ref="${HERMES_REF}" \
-    && if [ "${ref}" = "latest" ]; then \
-    ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
-    fi \
-    && echo "Hermes release tag: ${ref}" \
-    && path="$(curl -fsSL --retry 3 --retry-delay 2 "https://github.com/${HERMES_REPO}/releases/expanded_assets/${ref}" | grep -oE "/${HERMES_REPO}/releases/download/[^\"]+x86_64\.pkg\.tar\.zst" | head -n1)" \
-    && if [ -z "${path}" ]; then echo 'ERROR: no x86_64 Arch package asset found' >&2; exit 1; fi \
-    && echo "Downloading https://github.com${path}" \
-    && curl -fL --retry 3 -o /tmp/hermes.pkg.tar.zst "https://github.com${path}" \
-    && pacman -U --noconfirm /tmp/hermes.pkg.tar.zst \
-    && rm -f /tmp/hermes.pkg.tar.zst \
-    && pacman -S --noconfirm --needed \
-    libva-utils \
-    dbus \
-    mesa \
-    sway \
-    seatd \
-    wlr-randr \
-    xorg-xwayland \
-    wl-clipboard \
-    xclip \
-    foot \
-    wofi \
-    jq \
-    pipewire \
-    pipewire-pulse \
-    pipewire-audio \
-    wireplumber \
-    libpulse \
-    tzdata \
-    && pacman -Scc --noconfirm \
-    && rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
+# Enable multilib for 32-bit libraries
+RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
-RUN useradd --system --user-group --home-dir / \
-    --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true
+# Install all packages in a single layer with BuildKit cache mounts
+RUN --mount=type=cache,target=/var/cache/pacman/pkg,sharing=locked \
+    set -eu; \
+    # Download and install Hermes
+    ref="${HERMES_REF}"; \
+    if [ "${ref}" = "latest" ]; then \
+    ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
+    fi; \
+    echo "Hermes release tag: ${ref}"; \
+    path="$(curl -fsSL --retry 3 --retry-delay 2 "https://github.com/${HERMES_REPO}/releases/expanded_assets/${ref}" | grep -oE "/${HERMES_REPO}/releases/download/[^\"]+x86_64\.pkg\.tar\.zst" | head -n1)"; \
+    if [ -z "${path}" ]; then echo 'ERROR: no x86_64 Arch package asset found' >&2; exit 1; fi; \
+    echo "Downloading https://github.com${path}"; \
+    curl -fL --retry 3 -o /tmp/hermes.pkg.tar.zst "https://github.com${path}"; \
+    pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
+    rm -f /tmp/hermes.pkg.tar.zst; \
+    # Install base runtime packages
+    pacman -Syu --noconfirm --needed \
+    curl libva-utils dbus mesa sway seatd wlr-randr xorg-xwayland \
+    wl-clipboard xclip foot wofi jq \
+    pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
+    # Install Steam and GPU packages (multilib enabled above)
+    steam gamescope noto-fonts noto-fonts-cjk \
+    vulkan-radeon lib32-vulkan-radeon lib32-mesa \
+    vulkan-icd-loader lib32-vulkan-icd-loader lib32-libva-mesa-driver lib32-libpulse; \
+    # Create users
+    useradd --system --user-group --home-dir / --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true; \
+    useradd --uid 1000 --user-group --create-home --home-dir /home/steam --shell /bin/bash steam; \
+    for g in video render audio input seat; do \
+    getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
+    done; \
+    # Cleanup
+    pacman -Scc --noconfirm; \
+    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
 RUN setcap cap_sys_admin+p /usr/bin/hermes || true
 
@@ -123,25 +132,6 @@ COPY --from=builder /nm-fake/target/release/hermes-nm-fake /usr/local/bin/hermes
 
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch /usr/local/bin/hermes-nm-fake
-
-RUN set -eu; \
-    sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf; \
-    pacman -Syu --noconfirm --needed \
-    steam \
-    gamescope \
-    noto-fonts noto-fonts-cjk \
-    vulkan-radeon lib32-vulkan-radeon \
-    lib32-mesa \
-    vulkan-icd-loader lib32-vulkan-icd-loader \
-    lib32-libva-mesa-driver \
-    lib32-libpulse; \
-    useradd --uid 1000 --user-group --create-home --home-dir /home/steam \
-    --shell /bin/bash steam; \
-    for g in video render audio input seat; do \
-    getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
-    done; \
-    pacman -Scc --noconfirm; \
-    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 

@@ -22,43 +22,55 @@
 # cursor position and pulls it back into Virtual-1 whenever it strays out.
 set -euo pipefail
 
+# Extract all Virtual-1 info in a single swaymsg + jq call
+# Output format: exists|focused|width|height|cursor_x|cursor_y
+get_virtual1_info() {
+    local outs
+    outs="$(swaymsg -t get_outputs 2>/dev/null)" || { echo "false|||||"; return 0; }
+    printf '%s' "${outs}" | jq -r '
+        .[] | select(.name=="Virtual-1") |
+        "true|\(.focused)|\(.rect.width)|\(.rect.height)|\(.cursor.x)|\(.cursor.y)"
+    ' 2>/dev/null || echo "false|||||"
+}
+
 remap_inputs() {
     swaymsg 'input type:touch map_to_output Virtual-1' >/dev/null 2>&1 || true
     swaymsg 'input type:tablet_tool map_to_output Virtual-1' >/dev/null 2>&1 || true
 }
 
-refocus() {
-    local outs
-    outs="$(swaymsg -t get_outputs 2>/dev/null)" || return 0
-    printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1")' >/dev/null 2>&1 || return 0
+process_event() {
+    local info exists focused w h cx cy
+    info="$(get_virtual1_info)"
+    
+    IFS='|' read -r exists focused w h cx cy <<< "${info}"
+    
+    # Virtual-1 not present
+    [ "${exists}" = "true" ] || return 0
+    
+    # Remap inputs when Virtual-1 is present
     remap_inputs
-    printf '%s' "${outs}" | jq -e '.[] | select(.name=="Virtual-1" and .focused)' >/dev/null 2>&1 && return 0
-    swaymsg 'workspace 1' >/dev/null 2>&1 || true
-}
-
-constrain_cursor() {
-    local outs w h cx cy
-    outs="$(swaymsg -t get_outputs 2>/dev/null)" || return 0
-    w="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .rect.width')" || return 0
-    h="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .rect.height')" || return 0
-    [ "${w}" = "null" ] && return 0
-    [ "${h}" = "null" ] && return 0
-    cx="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .cursor.x')" || return 0
-    cy="$(printf '%s' "${outs}" | jq -r '.[] | select(.name=="Virtual-1") | .cursor.y')" || return 0
-    [ "${cx}" = "null" ] && return 0
-    [ "${cy}" = "null" ] && return 0
-    if [ "${cx}" -lt 0 ] || [ "${cx}" -ge "${w}" ] || [ "${cy}" -lt 0 ] || [ "${cy}" -ge "${h}" ]; then
-        local nx="${cx}" ny="${cy}"
-        [ "${nx}" -lt 0 ] && nx=0
-        [ "${nx}" -ge "${w}" ] && nx="$((w - 1))"
-        [ "${ny}" -lt 0 ] && ny=0
-        [ "${ny}" -ge "${h}" ] && ny="$((h - 1))"
-        swaymsg "move cursor to ${nx} ${ny}" >/dev/null 2>&1 || true
+    
+    # Refocus if not already focused
+    if [ "${focused}" != "true" ]; then
+        swaymsg 'workspace 1' >/dev/null 2>&1 || true
+    fi
+    
+    # Constrain cursor to Virtual-1 bounds
+    if [ "${w}" != "null" ] && [ "${h}" != "null" ] && \
+       [ "${cx}" != "null" ] && [ "${cy}" != "null" ]; then
+        if [ "${cx}" -lt 0 ] || [ "${cx}" -ge "${w}" ] || \
+           [ "${cy}" -lt 0 ] || [ "${cy}" -ge "${h}" ]; then
+            local nx="${cx}" ny="${cy}"
+            [ "${nx}" -lt 0 ] && nx=0
+            [ "${nx}" -ge "${w}" ] && nx="$((w - 1))"
+            [ "${ny}" -lt 0 ] && ny=0
+            [ "${ny}" -ge "${h}" ] && ny="$((h - 1))"
+            swaymsg "move cursor to ${nx} ${ny}" >/dev/null 2>&1 || true
+        fi
     fi
 }
 
-refocus
+process_event
 swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
-    refocus
-    constrain_cursor
+    process_event
 done

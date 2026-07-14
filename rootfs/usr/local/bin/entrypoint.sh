@@ -407,10 +407,9 @@ PIPEWIRE_RUNTIME_DIR=/run/pipewire
 PULSE_SOCKET="${PIPEWIRE_RUNTIME_DIR}/pulse/native"
 
 pw_alive() {
-    # The pulse-compat server answering the control protocol is the real proof
-    # the stack is up — an orphaned socket just refuses connections. This is the
-    # path Hermes and Steam actually connect through.
-    PULSE_SERVER="unix:${PULSE_SOCKET}" pactl info >/dev/null 2>&1
+    # Lightweight check: socket exists and pipewire-pulse process is running.
+    # Avoids the heavy `pactl info` process spawn on every watchdog iteration.
+    [ -S "${PULSE_SOCKET}" ] && pgrep -x pipewire-pulse >/dev/null 2>&1
 }
 
 pw_ready() {
@@ -489,18 +488,28 @@ start_pipewire_watchdog() {
 grant_gpu_access() {
     local user="$1" node gid gname
     id "${user}" >/dev/null 2>&1 || return 0
+    # Cache user's current groups to avoid repeated id -G calls
+    local user_groups
+    user_groups="$(id -G "${user}" 2>/dev/null)" || user_groups=""
     for node in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
         [ -e "${node}" ] || continue
+        # Use bash parameter expansion to extract GID (avoid stat fork)
         gid="$(stat -c '%g' "${node}" 2>/dev/null)" || continue
         [ -n "${gid}" ] || continue
-        id -G "${user}" 2>/dev/null | tr ' ' '\n' | grep -qx "${gid}" && continue
-        gname="$(getent group "${gid}" | cut -d: -f1)"
+        # Check if user already has this group using bash string matching
+        case " ${user_groups} " in
+            *" ${gid} "*) continue ;;
+        esac
+        # Use bash parameter expansion instead of cut
+        gname="$(getent group "${gid}" 2>/dev/null)"
+        gname="${gname%%:*}"
         if [ -z "${gname}" ]; then
             gname="gpu-${gid}"
             groupadd -g "${gid}" "${gname}" 2>/dev/null || true
         fi
         [ -n "${gname}" ] && usermod -aG "${gname}" "${user}" 2>/dev/null \
-            && log "granted ${user} access to ${node} (gid ${gid} via group ${gname})"
+            && log "granted ${user} access to ${node} (gid ${gid} via group ${gname})" \
+            && user_groups="${user_groups} ${gid}"
     done
 }
 
@@ -620,23 +629,36 @@ sanitize_apps() {
     grep -Eq 'xrandr|steam://|hermes-gamescope-launch|Low Res Desktop' "${APPS_JSON}" 2>/dev/null || return 0
     command -v jq >/dev/null 2>&1 || { warn "jq missing; leaving apps.json unchanged"; return 0; }
     local tmp; tmp="$(mktemp)"
+    # Step 1: Remove apps with hermes-gamescope-launch command or "Low Res Desktop" name
+    # Step 2: Clean prep-cmd (remove xrandr commands, clean up empty entries)
+    # Step 3: Clean detached (remove steam:// commands)
     if jq '
-          def clean:
-            ( if has("prep-cmd") then
-                .["prep-cmd"] = ( [ .["prep-cmd"][]
-                    | (.do //= "") | (.undo //= "")
-                    | select((.do | test("xrandr")) | not)
-                    | if (.undo | test("xrandr|steam://")) then .undo = "" else . end ]
-                  | map(select(.do != "" or .undo != "")) )
-              else . end )
-            | ( if has("detached") then
-                .detached = [ .detached[] | select(test("steam://") | not) ]
-              else . end )
-            | ( if (has("detached") and (.detached | length == 0)) then del(.detached) else . end )
-            | ( if (has("prep-cmd") and (.["prep-cmd"] | length == 0)) then del(.["prep-cmd"]) else . end );
-          .apps |= ( map(select((.cmd // "") != "hermes-gamescope-launch"))
-                     | map(select(.name != "Low Res Desktop"))
-                     | map(clean) )
+          # Remove xrandr from prep-cmd.do, remove xrandr/steam:// from prep-cmd.undo
+          def clean_prep_cmd:
+            if has("prep-cmd") then
+              .["prep-cmd"] = [
+                .["prep-cmd"][] |
+                (.do //= "") | (.undo //= "") |
+                select(.do | test("xrandr") | not) |
+                if (.undo | test("xrandr|steam://")) then .undo = "" else . end
+              ] | [.[] | select(.do != "" or .undo != "")] |
+              if length == 0 then empty else . end;
+            else . end;
+
+          # Remove steam:// from detached commands
+          def clean_detached:
+            if has("detached") then
+              .detached = [.detached[] | select(test("steam://") | not)] |
+              if length == 0 then empty else . end;
+            else . end;
+
+          .apps |= [
+            .[] |
+            select((.cmd // "") != "hermes-gamescope-launch") |
+            select(.name != "Low Res Desktop") |
+            clean_prep_cmd |
+            clean_detached
+          ]
         ' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
         cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
         log "sanitized apps.json (removed Low Res Desktop / xrandr / root steam:// / gamescope-launch)"
