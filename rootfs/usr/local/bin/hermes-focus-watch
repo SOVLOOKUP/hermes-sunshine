@@ -1,85 +1,26 @@
 #!/usr/bin/env bash
-# Keep sway's focus — and absolute-input mapping — on the streamed Virtual-1 output.
+# Keep sway's focus on the streamed Virtual-1 output.
 #
 # Hermes unplugs and replugs the per-session "Virtual-1" DRM connector on every
-# app switch. While it is gone sway parks focus (and a stray workspace) on the
-# off-screen HEADLESS-1 placeholder that keeps the output layout non-empty; when
-# Virtual-1 comes back sway does NOT move focus back, so the picture streams from
-# Virtual-1 but keyboard/mouse input silently goes to the invisible HEADLESS-1.
-# React to output/workspace events and snap focus back to Virtual-1 whenever it
-# is present and not already focused (the guard avoids a refocus feedback loop).
-#
-# The replug also drops the touch/pen/absolute-pointer -> Virtual-1 mapping set
-# in the sway config (absolute coordinates are normalised to the streamed
-# output; without the mapping they spread across the whole layout, including the
-# off-screen placeholder, and taps land in dead space with the cursor stuck
-# mid-screen). Re-assert that mapping each time Virtual-1 reappears.
-#
-# Also constrain the mouse cursor to Virtual-1. The HEADLESS-1 placeholder is
-# positioned at x=7680, far outside the streamed output. Without constraint,
-# the cursor can drift into HEADLESS-1 (e.g., by moving beyond the right edge
-# of Virtual-1), and clicks there have no visible effect. This script monitors
-# cursor position and pulls it back into Virtual-1 whenever it strays out.
+# app switch. While it is gone sway parks focus on the off-screen HEADLESS-1
+# placeholder; when Virtual-1 comes back sway does NOT move focus back, so the
+# picture streams from Virtual-1 but keyboard/mouse input silently goes to the
+# invisible HEADLESS-1. React to output/workspace events and snap focus back to
+# Virtual-1 whenever it is present and not already focused.
 set -euo pipefail
 
-last_w=""
-last_h=""
-last_exists="false"
-
-get_virtual1_info() {
-    local outs
-    outs="$(swaymsg -t get_outputs 2>/dev/null)" || { echo "false|||"; return 0; }
-    printf '%s' "${outs}" | jq -r '
-        .[] | select(.name=="Virtual-1") |
-        "true|\(.focused)|\(.rect.width)|\(.rect.height)"
-    ' 2>/dev/null || echo "false|||"
-}
-
-remap_inputs() {
-    swaymsg 'input type:touch map_to_output Virtual-1' >/dev/null 2>&1 || true
-    swaymsg 'input type:tablet_tool map_to_output Virtual-1' >/dev/null 2>&1 || true
-}
-
-resize_placeholder() {
-    local w h
-    w="$1"
-    h="$2"
-    swaymsg 'output HEADLESS-1 resolution 1x1' >/dev/null 2>&1 || true
-    swaymsg "output HEADLESS-1 position ${w} ${h}" >/dev/null 2>&1 || true
+get_virtual1_focused() {
+    swaymsg -t get_outputs 2>/dev/null | jq -r '.[] | select(.name=="Virtual-1") | .focused' 2>/dev/null || echo "null"
 }
 
 process_event() {
-    local info exists focused w h
-    info="$(get_virtual1_info)"
-    
-    IFS='|' read -r exists focused w h <<< "${info}"
-    
-    if [ "${exists}" != "true" ]; then
-        last_exists="false"
-        return 0
-    fi
-    
-    if [ "${last_exists}" != "true" ] || [ "${w}" != "${last_w}" ] || [ "${h}" != "${last_h}" ]; then
-        remap_inputs
-        if [ "${w}" != "null" ] && [ "${h}" != "null" ]; then
-            resize_placeholder "${w}" "${h}"
-            last_w="${w}"
-            last_h="${h}"
-        fi
-        last_exists="true"
-    fi
-    
-    if [ "${focused}" != "true" ]; then
-        swaymsg 'workspace 1' >/dev/null 2>&1 || true
-    fi
+    local focused
+    focused="$(get_virtual1_focused)"
+    [ "${focused}" = "true" ] && return 0
+    swaymsg 'workspace 1' >/dev/null 2>&1 || true
 }
 
 process_event
-swaymsg -t subscribe -m '["output","workspace","input"]' 2>/dev/null | while read -r _; do
-    process_event
-done &
-
-while true; do
-    sleep 0.5
+swaymsg -t subscribe -m '["output","workspace"]' 2>/dev/null | while read -r _; do
     process_event
 done
