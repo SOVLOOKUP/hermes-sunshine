@@ -208,23 +208,43 @@ impl WiredDevice {
     }
 
     #[zbus(property)]
-    fn name(&self) -> &str {
+    fn interface(&self) -> &str {
         "eth0"
     }
 
     #[zbus(property)]
     fn state(&self) -> u32 {
-        100
+        100 // NM_DEVICE_STATE_ACTIVATED
     }
 
     #[zbus(property)]
-    fn type_(&self) -> u32 {
-        1
+    fn device_type(&self) -> u32 {
+        1 // NM_DEVICE_TYPE_ETHERNET
     }
 
     #[zbus(property)]
     fn active_connection(&self) -> ObjectPath<'_> {
         ObjectPath::try_from(ACTIVE_CONNECTION_PATH).unwrap()
+    }
+}
+
+struct WiredDeviceExtra;
+
+#[interface(name = "org.freedesktop.NetworkManager.Device.Wired")]
+impl WiredDeviceExtra {
+    #[zbus(property)]
+    fn carrier(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn speed(&self) -> u32 {
+        1000
+    }
+
+    #[zbus(property)]
+    fn hw_address(&self) -> &str {
+        "00:00:00:00:00:01"
     }
 }
 
@@ -237,6 +257,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .serve_at(IP4_CONFIG_PATH, IP4Config)?
         .serve_at(IP6_CONFIG_PATH, IP6Config)?
         .serve_at(WIRED_DEVICE_PATH, WiredDevice)?
+        .serve_at(WIRED_DEVICE_PATH, WiredDeviceExtra)?
         .build()
         .await?;
 
