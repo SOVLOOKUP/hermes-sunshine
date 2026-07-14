@@ -22,8 +22,10 @@ set -euo pipefail
 STEAM_LOG=/var/log/steam.log
 # Cap the session log so long-term reconnects (and any crash loop) can't grow it
 # without bound: keep a single previous generation once it passes ~5 MiB.
-if [ -f "${STEAM_LOG}" ] && [ "$(stat -c%s "${STEAM_LOG}" 2>/dev/null || echo 0)" -gt 5242880 ]; then
-    mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
+if [ -f "${STEAM_LOG}" ]; then
+    local log_size
+    log_size="$(wc -c <"${STEAM_LOG}" 2>/dev/null || echo 0)"
+    [ "${log_size}" -gt 5242880 ] && mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
 fi
 exec >>"${STEAM_LOG}" 2>&1
 
@@ -74,13 +76,13 @@ exec runuser -u steam -- env \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
-    sh -c '
+    bash -c '
         delay=2; max=60
         while :; do
-            start=$(date +%s)
+            SECONDS=0
             steam -gamepadui
             rc=$?
-            ran=$(( $(date +%s) - start ))
+            ran=$SECONDS
             [ "${ran}" -ge 30 ] && delay=2
             printf "[hermes-steam] Steam exited (rc=%s) after %ss; relaunching in %ss\n" "${rc}" "${ran}" "${delay}"
             sleep "${delay}"

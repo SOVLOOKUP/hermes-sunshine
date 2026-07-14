@@ -126,8 +126,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     yes | pacman -Scc; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
-RUN setcap cap_sys_admin+p /usr/bin/hermes || true
-RUN setcap cap_sys_admin+ep /usr/bin/sway || true
+RUN setcap cap_sys_admin+p /usr/bin/hermes || true; setcap cap_sys_admin+ep /usr/bin/sway || true
 
 COPY --from=builder /nm-fake/target/release/hermes-nm-fake /usr/local/bin/hermes-nm-fake
 
