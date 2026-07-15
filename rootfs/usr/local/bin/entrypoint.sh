@@ -524,6 +524,9 @@ prepare_steam() {
     # Ensure the steam user can actually open the GPU render node.
     grant_gpu_access steam
 
+    # Grant access to /dev/uhid for virtual gamepad creation
+    [ -c /dev/uhid ] && chgrp input /dev/uhid && chmod 660 /dev/uhid
+
     local uid runtime sockpath
     uid="$(id -u steam)"
     runtime="/run/user/${uid}"
