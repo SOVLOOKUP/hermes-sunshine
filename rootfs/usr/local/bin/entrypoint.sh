@@ -527,6 +527,16 @@ prepare_steam() {
     # Grant access to /dev/uhid for virtual gamepad creation
     [ -c /dev/uhid ] && chgrp input /dev/uhid && chmod 660 /dev/uhid
 
+    # Grant access to input devices whose GID doesn't match container's input group
+    for dev in /dev/input/event* /dev/input/js*; do
+        [ -c "${dev}" ] || continue
+        gid="$(stat -c '%g' "${dev}" 2>/dev/null)" || continue
+        [ "${gid}" = "992" ] && continue
+        gname="$(getent group "${gid}" | cut -d: -f1 2>/dev/null)"
+        [ -z "${gname}" ] && gname="input-${gid}" && groupadd -g "${gid}" "${gname}" 2>/dev/null || true
+        usermod -aG "${gname}" steam 2>/dev/null && log "granted steam access to ${dev} (gid ${gid} via group ${gname})"
+    done
+
     local uid runtime sockpath
     uid="$(id -u steam)"
     runtime="/run/user/${uid}"
