@@ -5,7 +5,7 @@
 # before launching sway.
 #
 # The virtual output is provided by the Hermes-KMS kernel module loaded on the
-# HOST (connector HERMES-1 / Virtual-*). sway drives it via the wlroots DRM
+# HOST (connector Virtual-1; the driver labels its output HERMES-1 internally). sway drives it via the wlroots DRM
 # backend and Hermes captures the scanout zero-copy from the hermes_kms render
 # node. When the module/device is absent the entrypoint falls back to the
 # wlroots headless backend (software output). The output name therefore varies,

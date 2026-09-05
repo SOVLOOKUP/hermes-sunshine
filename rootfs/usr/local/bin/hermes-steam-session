@@ -48,7 +48,7 @@ exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
-    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse-native}" \
+    PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
     "${TZ_ENV[@]}" \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \

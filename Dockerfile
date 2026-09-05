@@ -82,7 +82,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
     pacman -S --noconfirm --needed \
-    curl libva-utils dbus mesa sway seatd wlr-randr xorg-xwayland \
+    curl libva-utils dbus mesa sway seatd xorg-xwayland \
     wl-clipboard xclip foot wofi jq \
     pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
     steam gamescope noto-fonts noto-fonts-cjk \
