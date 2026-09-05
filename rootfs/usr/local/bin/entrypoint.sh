@@ -6,8 +6,14 @@ set -euo pipefail
 log()  { printf '\033[0;36m[hermes]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[0;33m[hermes][warn]\033[0m %s\n' "$*" >&2; }
 
-HERMES_CONFIG="${HERMES_CONFIG:-/config/sunshine.conf}"
-APPS_JSON="${APPS_JSON:-/config/.config/sunshine/apps.json}"
+# Hermes 0.5.0+ owns its config dir (~/.config/hermes). HOME is /config here,
+# so hermes reads /config/.config/hermes/{hermes.conf,apps.json,...}; the flat
+# paths below keep the config file directly in the volume and are handed to
+# hermes explicitly.
+HERMES_CONFIG="${HERMES_CONFIG:-/config/hermes.conf}"
+APPS_JSON="${APPS_JSON:-/config/.config/hermes/apps.json}"
+LEGACY_HERMES_CONFIG="/config/sunshine.conf"
+LEGACY_SUNSHINE_APPS="/config/.config/sunshine/apps.json"
 STEAM_SESSION_CMD="/usr/local/bin/hermes-steam-session"
 SWAY_TEMPLATE="/etc/sway/config"
 SWAY_CONFIG="/run/hermes/sway.config"
@@ -616,6 +622,24 @@ set_conf_key() {
 
 seed_config() {
     mkdir -p "$(dirname "${HERMES_CONFIG}")"
+    # Volumes created before Hermes stopped sharing ~/.config/sunshine with
+    # Apollo and Sunshine carry the config as /config/sunshine.conf. Hermes
+    # migrates its own directory (/config/.config/sunshine -> .../hermes) on
+    # start, but this flat path is ours, so rename it here or the container
+    # would come up on an empty config and lose the user's settings.
+    if [ -f "${LEGACY_HERMES_CONFIG}" ] && [ ! -f "${HERMES_CONFIG}" ]; then
+        mv "${LEGACY_HERMES_CONFIG}" "${HERMES_CONFIG}" \
+            && log "migrated ${LEGACY_HERMES_CONFIG} -> ${HERMES_CONFIG}" \
+            || warn "could not migrate ${LEGACY_HERMES_CONFIG}"
+    fi
+    # Same story for the app list: hermes migrates the structured dir on its
+    # own first start, but our sanitize/steam-registration below runs before
+    # that, so copy the legacy file into place when there is nothing to patch.
+    if [ -f "${LEGACY_SUNSHINE_APPS}" ] && [ ! -f "${APPS_JSON}" ]; then
+        mkdir -p "$(dirname "${APPS_JSON}")"
+        cp "${LEGACY_SUNSHINE_APPS}" "${APPS_JSON}" \
+            && log "migrated ${LEGACY_SUNSHINE_APPS} -> ${APPS_JSON}"
+    fi
     touch "${HERMES_CONFIG}"
     ensure_conf_key address_family both
     ensure_conf_key upnp enabled

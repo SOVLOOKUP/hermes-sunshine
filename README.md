@@ -13,7 +13,7 @@ The image is self-contained: it starts a **Wayland** session (the
 [sway](https://swaywm.org/) wlroots compositor), a PipeWire virtual sink, and
 mDNS discovery, then launches the host. The virtual monitor comes from the
 [**Hermes-KMS**](https://github.com/MrOz59/Hermes-KMS) kernel module loaded on
-the **host**: sway drives its DRM output (`HERMES-1`) and Hermes captures the
+the **host**: sway drives its DRM output (connector `Virtual-1`) and Hermes captures the
 scanout zero-copy from the `hermes_kms` render node straight into the GPU
 encoder. You pair and configure everything from the web UI, exactly like stock
 Sunshine. Clients: **Moonlight**, **Artemis**, or **Hestia**.
@@ -106,7 +106,7 @@ cd Hermes-KMS
 sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/hermes_kms.ko
 
 # Load it enabled so a compositor can adopt the output:
-sudo modprobe hermes_kms initial_enabled=1
+sudo modprobe hermes_kms initial_enabled=0
 ls -l /dev/dri                  # a new virtual card + render node appears
 ```
 
@@ -118,7 +118,7 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 > updated to the matching Hermes release in the same step. Never install from
 > the default branch; always check out the release tag matching your container
 > image, and reload the module (`modprobe -r hermes_kms && modprobe hermes_kms
-> initial_enabled=1`) before restarting the container.
+> initial_enabled=0`) before restarting the container.
 
 To make the module load **automatically on system boot**:
 
@@ -126,19 +126,23 @@ To make the module load **automatically on system boot**:
 # Create module auto-load configuration
 echo "hermes_kms" | sudo tee /etc/modules-load.d/hermes-kms.conf
 
-# Set default module parameters (initial_enabled=1 ensures the virtual display is ready at boot)
-echo "options hermes_kms initial_enabled=1" | sudo tee /etc/modprobe.d/hermes-kms.conf
+# Set default module parameters. Leave the connector disconnected (0 — the
+# packaged default): this container hotplugs the virtual output per session
+# via headless_mode, and hermes 0.5.1 disconnects unowned enabled outputs at
+# startup anyway.
+echo "options hermes_kms initial_enabled=0" | sudo tee /etc/modprobe.d/hermes-kms.conf
 ```
 
-Without this, the module must be reloaded manually after each reboot (`sudo modprobe hermes_kms initial_enabled=1`), otherwise the container will fall back to the slower headless (software) output.
+Without this, the module must be reloaded manually after each reboot (`sudo modprobe hermes_kms initial_enabled=0`), otherwise the container will fall back to the slower headless (software) output.
 
 Then pass `/dev/dri` into the container (the compose file already does). The data
 flow is:
 
-1. `hermes_kms.ko` on the host exposes a virtual DRM card whose output is
-   `HERMES-1`, plus a render node.
+1. `hermes_kms.ko` on the host exposes a virtual DRM card whose connector is
+   named `Virtual-1` (the driver's internal output label is `HERMES-1`), plus a
+   render node.
 2. **sway** (inside the container) takes DRM master on that card and scans the
-   desktop out to the `HERMES-1` output; a **real GPU** does the rendering.
+   desktop out to the `Virtual-1` output; a **real GPU** does the rendering.
 3. **Hermes** opens the `hermes_kms` render node (masterless) and pulls the
    scanout as DMA-BUFs, which the real GPU encodes — the frame never leaves the
    GPU.
@@ -329,17 +333,20 @@ denied`.
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |
 | `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
-| `HERMES_CONFIG`    | `/config/sunshine.conf` | Config file path (state is stored beside it).                                                                                                                                   |
+| `HERMES_CONFIG`    | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
 
 The virtual output resolution is set at runtime from `DISPLAY_WIDTH`/`HEIGHT`/
 `REFRESH`. Drop extra sway snippets into `./config/sway.d/*.conf` on the host to
 customise the session (they are `include`d by the generated config).
 
-On a fresh `/config` volume the entrypoint seeds `sunshine.conf` with sensible
+On a fresh `/config` volume the entrypoint seeds `hermes.conf` with sensible
 defaults (`address_family = both`, `upnp = enabled`,
-`virtual_display_backend = hermes_kms`) before starting Hermes. It only seeds
-when the file is absent, so edits you make in the web UI (which Hermes writes
-back to the same file) are never overwritten.
+`virtual_display_backend = hermes_kms`) before starting Hermes. Volumes created
+by older image versions are migrated in place (`/config/sunshine.conf` →
+`/config/hermes.conf`, legacy `apps.json` copied into
+`/config/.config/hermes/`). The entrypoint only seeds when a key is absent, so
+edits you make in the web UI (which Hermes writes back to the same file) are
+never overwritten.
 
 ## Ports
 
@@ -378,8 +385,8 @@ when host networking is unavailable.
 - **Virtual display = host kernel module.** The low-latency path relies on the
   [Hermes-KMS](https://github.com/MrOz59/Hermes-KMS) DRM/KMS module, which is
   out-of-tree and must be built + loaded on the **host** (`modprobe hermes_kms
-initial_enabled=1`); it cannot be loaded from inside a container. sway (in the
-  container) drives its `HERMES-1` output and Hermes captures the scanout
+initial_enabled=0`); it cannot be loaded from inside a container. sway (in the
+  container) drives its `Virtual-1` output and Hermes captures the scanout
   zero-copy from the `hermes_kms` render node. See
   [Virtual display](#virtual-display--hermes-kms).
 - **Headless fallback.** If no `hermes_kms` card is present, `HERMES_KMS=off`, or
