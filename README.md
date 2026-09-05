@@ -88,8 +88,20 @@ which must be built and loaded on the **host** (it is an out-of-tree module and
 cannot be loaded from a container):
 
 ```bash
-# On the HOST — build & install via DKMS (needs matching kernel headers):
-git clone https://github.com/MrOz59/Hermes-KMS
+# On the HOST — automated install (recommended). Fetches the pinned release,
+# patches the source if the kernel headers are trimmed (e.g. no
+# drm/drm_dumb_buffers.h), builds via DKMS, swaps the loaded module (stopping
+# the container first) and verifies the LIVE driver version + UAPI with a
+# static hermes-kmsctl:
+sudo ./host-module/build-hermes-kms.sh            # installs v0.3.2 (UAPI 9)
+sudo ./host-module/build-hermes-kms.sh verify    # re-check the running module any time
+
+# Manual equivalent — IMPORTANT: pin the tag. The repo's default branch is the
+# 0.4.x development line (UAPI v13); this image's Hermes 0.5.x speaks UAPI v9
+# (Hermes-KMS 0.3.x). A mismatching module loads fine but every capture ioctl
+# fails, and sessions die with "Failed to initialize video capture/encoding" /
+# "no active scanout geometry yet" in the container log.
+git clone --branch v0.3.2 --depth 1 https://github.com/MrOz59/Hermes-KMS
 cd Hermes-KMS
 sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/hermes_kms.ko
 
@@ -97,6 +109,16 @@ sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/herm
 sudo modprobe hermes_kms initial_enabled=1
 ls -l /dev/dri                  # a new virtual card + render node appears
 ```
+
+> **Upgrading the host module?** Each Hermes release expects a specific
+> Hermes-KMS UAPI line (Hermes 0.5.x ↔ UAPI 7/8/9, i.e. Hermes-KMS 0.3.x; the
+> unreleased Hermes 0.6/main ↔ UAPI 10+). The script above derives the expected
+> UAPI from the tag and refuses to pass verification on a mismatch, so the same
+> command keeps working for future releases — but the container image must be
+> updated to the matching Hermes release in the same step. Never install from
+> the default branch; always check out the release tag matching your container
+> image, and reload the module (`modprobe -r hermes_kms && modprobe hermes_kms
+> initial_enabled=1`) before restarting the container.
 
 To make the module load **automatically on system boot**:
 
