@@ -475,6 +475,17 @@ start_pipewire_watchdog() {
 grant_gpu_access() {
     local user="$1" node gid gname
     id "${user}" >/dev/null 2>&1 || return 0
+    # Clean up a dangerous legacy grant: older versions added the user to the
+    # root group for root:root DRM nodes (see the gid-0 skip below). Group
+    # membership persists in the container filesystem across container restarts,
+    # so actively remove it — as a root-group member the user evaluates group
+    # bits instead of others bits everywhere, which breaks the others-based
+    # Wayland socket sharing in the steam launcher (gamescope then dies with
+    # "Failed to connect to wayland socket").
+    if id -nG "${user}" 2>/dev/null | tr ' ' '\n' | grep -qx root; then
+        gpasswd -d "${user}" root >/dev/null 2>&1 \
+            && log "removed ${user} from the root group (legacy GPU-access grant)"
+    fi
     # Cache user's current groups to avoid repeated id -G calls
     local user_groups
     user_groups="$(id -G "${user}" 2>/dev/null)" || user_groups=""
@@ -483,6 +494,18 @@ grant_gpu_access() {
         # Use bash parameter expansion to extract GID (avoid stat fork)
         gid="$(stat -c '%g' "${node}" 2>/dev/null)" || continue
         [ -n "${gid}" ] || continue
+        # NEVER grant gid 0. A root:root node is either mislabelled (an orphaned
+        # node from a reloaded module — udev will re-own it once the driver is
+        # really loaded) or already usable by root only; putting a user in the
+        # root group does not help either way and is actively harmful: group bits
+        # then take precedence over the others bits the Wayland socket sharing
+        # below relies on (steam in group root loses traverse on /tmp/runtime
+        # because its group bits are ---), silently killing gamescope's
+        # "Failed to connect to wayland socket".
+        if [ "${gid}" = "0" ]; then
+            warn "skipping ${node}: owned root:root (gid 0) — not granting the root group to ${user}"
+            continue
+        fi
         # Check if user already has this group using bash string matching
         case " ${user_groups} " in
             *" ${gid} "*) continue ;;
