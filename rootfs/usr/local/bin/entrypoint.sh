@@ -309,6 +309,32 @@ launch_kwin() {
     # no frame is ever scanned out. The legacy (drmModeSetCrtc) path has no such
     # state machine and sets the mode correctly on the Hermes-KMS card, so use it
     # for KWin by default; set KWIN_DRM_NO_AMS=0 to force atomic back on.
+    # KWin starts Xwayland without an -auth argument, so the X server falls back
+    # to $XAUTHORITY (or ~/.Xauthority) for its cookie file. Neither exists in
+    # this container, and anything under /root is root-only anyway, so the steam
+    # user cannot authenticate and Steam dies with "unable to open a connection
+    # to X". Pre-create a shared cookie file, hand it to Xwayland through KWin's
+    # inherited environment, and let the launcher pass the same path to steam.
+    # The file is world-readable on purpose: it only unlocks the throwaway
+    # Xwayland instance inside this container.
+    local xauth_file=/tmp/.hermes-xauthority
+    local xauth_hex xauth_pos
+    xauth_hex="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    : > "${xauth_file}"
+    for xauth_pos in 0 1 2 3 4 5 6 7 8 9; do
+        # Xauthority entry: FamilyWild, empty address, display number, cookie
+        # name, then the 16-byte cookie; every field is length-prefixed with a
+        # big-endian u16. Hand-written so the image does not need xorg-xauth.
+        printf '\377\377\000\000\000\001%s\000\022MIT-MAGIC-COOKIE-1\000\020' \
+            "${xauth_pos}" >> "${xauth_file}"
+        local xauth_i
+        for ((xauth_i = 0; xauth_i < 32; xauth_i += 2)); do
+            printf "\\x${xauth_hex:xauth_i:2}" >> "${xauth_file}"
+        done
+    done
+    chmod 644 "${xauth_file}"
+    export XAUTHORITY="${xauth_file}"
+
     KWIN_DRM_NO_AMS="${KWIN_DRM_NO_AMS:-1}" \
     KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
     XDG_SESSION_TYPE=wayland \
@@ -330,12 +356,13 @@ launch_kwin() {
         export WAYLAND_DISPLAY="${sock}"
         log "kwin_wayland up on ${HERMES_KMS_CARD} (WAYLAND_DISPLAY=${sock})"
         # GL init happens before the socket appears, so this is the earliest
-        # point a failed renderer shows up. KWin keeps running without a GPU
-        # context and simply never composites, which is very hard to see later.
+        # point a failed renderer shows up. It is NOT fatal on the virtual card:
+        # the Hermes-KMS node has no render engine, KWin falls back to llvmpipe
+        # and still composites (SDR streaming works that way), just with
+        # software rendering. Only worth escalating if the stream stays black.
         if grep -qiE "ZINK|failed to choose pdev|no GPU context|OpenGL context" \
                 "${KWIN_LOG:-/var/log/kwin.log}" 2>/dev/null; then
-            warn "KWin has no usable GL/Vulkan context (see ${KWIN_LOG:-/var/log/kwin.log});"
-            warn "the virtual output will be enabled but never scanned out"
+            log "note: KWin's GL probe failed on ${HERMES_KMS_CARD}; it composites with llvmpipe (software rendering)"
         fi
         return 0
     fi
@@ -972,8 +999,15 @@ fi
 # --- hardware encode diagnostics (non-fatal) --------------------------------
 if [ -d /dev/dri ]; then
     log "GPU nodes: $(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
-    vainfo 2>/dev/null | grep -E 'Driver version|VAProfile' | head -n 5 || \
-        warn "VAAPI not usable inside the container (check /dev/dri passthrough and drivers)"
+    # vainfo often reports nothing useful as root even when encoding works
+    # (Hermes probes h264/hevc/av1_vaapi itself when a stream starts), so this is
+    # a note, not a warning: crying wolf here sent us chasing a non-issue.
+    va_info="$(vainfo 2>&1 | head -n 4)"
+    if printf '%s' "${va_info}" | grep -q 'VAProfile'; then
+        log "VAAPI: $(printf '%s' "${va_info}" | grep -E 'Driver version|VAProfile' | head -n 3 | tr '\n' ' ')"
+    else
+        log "note: vainfo reported no profiles (${va_info%%$'\n'*}); Hermes probes encoders itself at stream time"
+    fi
 else
     warn "/dev/dri not present — no GPU. Wayland capture/hardware encoding will not work."
 fi
