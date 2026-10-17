@@ -298,10 +298,16 @@ launch_kwin() {
     [ -n "${render_env}" ] \
         && warn "not passing render env to KWin (${render_env}): KWin needs its own GL/Vulkan context"
 
+    # KWin logs through Qt, which drops debug output unless it is told to write to
+    # stderr: without these two variables /var/log/kwin.log only holds Mesa's
+    # driver chatter (three "ZINK: failed to choose pdev" lines and nothing else),
+    # which says nothing about why an output was never scanned out.
     KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
     XDG_SESSION_TYPE=wayland \
     XDG_CURRENT_DESKTOP=KDE \
     XDG_SESSION_DESKTOP=KDE \
+    QT_FORCE_STDERR_LOGGING=1 \
+    QT_LOGGING_RULES="${KWIN_LOGGING_RULES:-kwin_*.debug=true}" \
     env -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LIBGL_ALWAYS_SOFTWARE \
     kwin_wayland --drm --socket "${sock}" --xwayland \
         --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
