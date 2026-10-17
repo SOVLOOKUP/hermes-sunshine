@@ -561,6 +561,23 @@ start_compositor() {
             elif [ -z "${XAUTHORITY:-}" ]; then
                 warn "Xwayland runs without an -auth file; X11 apps may fail with 'unable to open a connection to X'"
             fi
+            # The X server trusts local connections that run as its own uid
+            # (root here), which is why root connects with any cookie while the
+            # steam user is refused "Invalid MIT-MAGIC-COOKIE-1 key" even when
+            # it presents the byte-identical file: the server's auth data is not
+            # the file we can write. Grant the user explicitly instead. Root can
+            # run xhost because it is the trusted local uid.
+            if command -v xhost >/dev/null 2>&1; then
+                if DISPLAY="${DISPLAY}" xhost +SI:localuser:steam >/dev/null 2>&1; then
+                    log "X: granted the steam user access to ${DISPLAY} (xhost SI:localuser)"
+                elif DISPLAY="${DISPLAY}" xhost +local: >/dev/null 2>&1; then
+                    log "X: granted all local users access to ${DISPLAY} (xhost +local:)"
+                else
+                    warn "X: could not grant the steam user access to ${DISPLAY}; Steam may fail with 'unable to open a connection to X'"
+                fi
+            else
+                warn "xhost missing (rebuild the image): the steam user may not be able to reach ${DISPLAY}"
+            fi
         else
             # KWin binds the X11 listen sockets before it execs Xwayland, so a
             # socket file alone is not proof of a working X server: a crashed

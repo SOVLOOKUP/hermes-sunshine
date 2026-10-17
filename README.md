@@ -356,9 +356,12 @@ How it works and what to know:
   commit with mode properties but without `ALLOW_MODESET`, which this driver's
   kernel rejects with `Modeset failed: Invalid argument` in a loop — the legacy
   `drmModeSetCrtc` path works), and the Xwayland auth cookie is copied to
-  `/tmp/.hermes-xauthority` and exported as `XAUTHORITY`, because KWin's Xwayland
-  keeps it root-only and the `steam` user would otherwise die with "unable to
-  open a connection to X".
+  `/tmp/.hermes-xauthority` and exported as `XAUTHORITY`. The cookie alone is not
+  enough: the X server trusts local connections running as its own uid (root), so
+  the unprivileged `steam` user is refused even with a byte-identical cookie --
+  the container therefore runs `xhost +SI:localuser:steam` once Xwayland is up
+  (falling back to `xhost +local:`), otherwise Steam dies with "unable to open a
+  connection to X".
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
