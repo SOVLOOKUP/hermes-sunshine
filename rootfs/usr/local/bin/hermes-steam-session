@@ -44,6 +44,36 @@ chmod o+rw "${sockpath}" 2>/dev/null || true
 TZ_ENV=()
 [ -n "${TZ:-}" ] && TZ_ENV=(TZ="${TZ}")
 
+# D-Bus session bus. Since the 2026-10-16 client build Steam starts through the
+# SteamRT3 client: it re-execs itself into the Steam Linux Runtime
+# ("ReexecToLauncher: steamrt3 client enabled" -> "ReexecSteamLinux: re-launching
+# steam in SteamRT runtime"), and steam-runtime-launcher-service needs a D-Bus
+# *session* bus for that hand-off. This container only runs a system bus
+# (entrypoint.sh), so without one the launcher service dies with
+#
+#   steam-runtime-launcher-service: E: Can't find session bus: ... dbus-launch
+#       --autolaunch=... exited with code 1
+#   srt-client-container: E: Couldn't start subprocess launcher: exited code 69
+#   ReexecSteamLinux: exiting
+#
+# and steam itself returns 125 within a second, leaving the stream on the plain
+# desktop (the "Steam exited (rc=125) after 0s" loop in /var/log/steam.log).
+# Give every stream session its own session bus by starting one as the steam user
+# with the socket in its runtime dir — the same XDG_RUNTIME_DIR the SteamRT3
+# sandbox shares, so both the launcher service (outside) and the client (inside)
+# can reach it. dbus-run-session tears the bus down with the session.
+DBUS_WRAP=()
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    # A hard-killed previous session can leave the socket behind, and dbus-daemon
+    # then refuses to bind it; nothing else can own it here (single session host).
+    if [ -S "${runtime}/bus" ]; then
+        rm -f "${runtime}/bus"
+    fi
+    DBUS_WRAP=(dbus-run-session --)
+elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    warn "dbus-run-session missing: Steam's SteamRT3 launcher will fail without a session bus"
+fi
+
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
@@ -51,6 +81,7 @@ exec runuser -u steam -- env \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
     "${TZ_ENV[@]}" \
+    "${DBUS_WRAP[@]}" \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
     bash -c '
         delay=2; max=60

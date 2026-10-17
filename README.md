@@ -283,6 +283,16 @@ How it works and what to know:
 - **First run is slower.** Because Steam starts fresh each connection, the very
   first stream re-runs Steam's bootstrap ("Setting up Steam content"). That data
   lives in `/config/steam` (below), so every subsequent connection comes up fast.
+- **D-Bus session bus.** Since the 2026-10-16 client build Steam boots through the
+  SteamRT3 client: the updater re-execs the client into the Steam Linux Runtime,
+  and `steam-runtime-launcher-service` needs a D-Bus *session* bus for that
+  hand-off. The container only runs a system bus (for avahi), so the per-session
+  launcher starts the session through `dbus-run-session`, with the bus socket in
+  the `steam` user's runtime dir. Without it the client exits immediately
+  (`Steam exited (rc=125) after 0s` in `/var/log/steam.log`, and
+  `Can't find session bus` / `Couldn't start subprocess launcher` in
+  `/config/steam/.local/share/Steam/logs/console-linux.txt`) and the stream shows
+  only the plain desktop.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
