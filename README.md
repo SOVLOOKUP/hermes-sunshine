@@ -355,13 +355,28 @@ How it works and what to know:
   `KWIN_DRM_NO_AMS=1` (KWin's atomic commit state machine sends a TEST_ONLY
   commit with mode properties but without `ALLOW_MODESET`, which this driver's
   kernel rejects with `Modeset failed: Invalid argument` in a loop — the legacy
-  `drmModeSetCrtc` path works), and the Xwayland auth cookie is copied to
+  `drmModeSetCrtc` path works), the Xwayland auth cookie is copied to
   `/tmp/.hermes-xauthority` and exported as `XAUTHORITY`. The cookie alone is not
   enough: the X server trusts local connections running as its own uid (root), so
   the unprivileged `steam` user is refused even with a byte-identical cookie --
   the container therefore runs `xhost +SI:localuser:steam` once Xwayland is up
   (falling back to `xhost +local:`), otherwise Steam dies with "unable to open a
   connection to X".
+
+  Two performance/HDR limits are inherent to the virtual card and worth knowing
+  before debugging them:
+
+  * Hermes-KMS has no render engine, so KWin composites with llvmpipe unless it
+    is handed a real GPU (`KWIN_DRM_DEVICES=/dev/dri/card0:/dev/dri/card1`). That
+    makes KWin render on the amdgpu card, but its cross-GPU path then cannot get
+    the frame onto `Virtual-1` — Hermes reports "did not commit the requested SDR
+    scanout before capture". sway does support the split
+    (`WLR_DRM_DEVICES=card1` + `WLR_RENDER_DRM_DEVICE=renderD128`) and streams
+    smoothly, but sway/wlroots does not set the HDR colours on the connector.
+  * HDR therefore needs KWin (KScreen + KWin's HDR output) and pays the llvmpipe
+    price: usable around 1080p60, not at 4K. The module must be loaded with
+    `hdr_enable=1 color_depth=10`; Hermes then reports "Display is HDR: true"
+    instead of "streaming SDR".
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland

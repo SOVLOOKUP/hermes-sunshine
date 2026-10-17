@@ -377,15 +377,30 @@ launch_kwin() {
         PIDS+=("${pid}")
         export WAYLAND_DISPLAY="${sock}"
         log "kwin_wayland up on ${HERMES_KMS_CARD} (WAYLAND_DISPLAY=${sock})"
-        # GL init happens before the socket appears, so this is the earliest
-        # point a failed renderer shows up. It is NOT fatal on the virtual card:
-        # the Hermes-KMS node has no render engine, KWin falls back to llvmpipe
-        # and still composites (SDR streaming works that way), just with
-        # software rendering. Only worth escalating if the stream stays black.
-        if grep -qiE "ZINK|failed to choose pdev|no GPU context|OpenGL context" \
-                "${KWIN_LOG:-/var/log/kwin.log}" 2>/dev/null; then
-            log "note: KWin's GL probe failed on ${HERMES_KMS_CARD}; it composites with llvmpipe (software rendering)"
-        fi
+        # Which GPU KWin actually renders on decides whether streaming is usable:
+        # the Hermes-KMS card has no render engine, so picking it means llvmpipe
+        # and a very slow 4K desktop. KWin logs its choice a moment after the
+        # Wayland socket appears, so wait briefly and read the decision instead
+        # of grepping for stray Mesa warnings (those also appear when the probe
+        # fails on the virtual card but rendering still happens on the real GPU).
+        local primary="" _
+        for _ in $(seq 1 20); do
+            primary="$(grep -a "as the primary GPU" "${KWIN_LOG:-/var/log/kwin.log}" 2>/dev/null | tail -n1 || true)"
+            [ -n "${primary}" ] && break
+            sleep 0.25
+        done
+        case "${primary}" in
+            *llvmpipe*)
+                log "note: KWin renders with llvmpipe (software) on ${HERMES_KMS_CARD}; 4K will be slow"
+                log "note: pass KWIN_DRM_DEVICES=/dev/dri/card0:/dev/dri/card1 to render on the real GPU (scanout through Hermes-KMS does not work that way yet)"
+                ;;
+            *renderD*|*card*)
+                log "KWin renders on hardware: ${primary#*Chose }"
+                ;;
+            *)
+                log "note: KWin did not report a primary GPU (see ${KWIN_LOG:-/var/log/kwin.log})"
+                ;;
+        esac
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
