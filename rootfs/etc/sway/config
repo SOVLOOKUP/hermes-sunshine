@@ -103,7 +103,10 @@ bindsym $mod+d exec $menu
 # shortcut is pressed.
 bindsym Control+Alt+t exec $term
 bindsym Control+Alt+d exec $menu
-exec $term
+# No terminal is started automatically: this session is streamed as an
+# appliance, and a fullscreen foot window used to cover the desktop (and the
+# Steam/gamescope surface) so the client saw a terminal instead of the game.
+# Ctrl+Alt+T is still bound above for when a shell is actually wanted.
 
 bindsym $mod+Shift+q kill
 bindsym $mod+Shift+c reload
