@@ -293,6 +293,13 @@ How it works and what to know:
   `Can't find session bus` / `Couldn't start subprocess launcher` in
   `/config/steam/.local/share/Steam/logs/console-linux.txt`) and the stream shows
   only the plain desktop.
+- **Big Picture must not minimize itself.** `SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0` is
+  exported by the per-session launcher. Without it, Big Picture minimizes the
+  moment a game window takes focus; gamescope then has no focused window to show
+  and paints its root window, so the stream falls back to the desktop while the
+  game keeps running in the background (its `Gamescope WSI` surface stays alive).
+  See "Big Picture Mode minimizes itself after losing focus" in the ArchWiki
+  Steam/Troubleshooting page.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland

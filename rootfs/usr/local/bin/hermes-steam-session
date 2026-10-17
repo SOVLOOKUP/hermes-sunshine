@@ -80,6 +80,14 @@ exec runuser -u steam -- env \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
+    # Big Picture minimizes itself as soon as it loses focus — i.e. the moment a
+    # game window takes over. Inside this nested gamescope that looks exactly
+    # like "the game crashed and the stream fell back to the desktop": the game
+    # keeps running and rendering (its Gamescope WSI surface stays alive), but
+    # the focused window is gone, so gamescope paints its root window instead.
+    # SDL hint; see "Big Picture Mode minimizes itself after losing focus" in
+    # the ArchWiki Steam/Troubleshooting page.
+    SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
     gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
