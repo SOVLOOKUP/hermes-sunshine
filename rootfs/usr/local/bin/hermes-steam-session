@@ -2,10 +2,17 @@
 # Per-session Steam Big Picture launcher, invoked by Hermes as the "cmd" of the
 # "Steam Big Picture" app (see entrypoint.sh / apps.json). Hermes runs this as
 # root when a client starts the app and exports the stream's negotiated geometry
-# in SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS. We size gamescope to exactly that, so the
-# picture is rendered natively (no upscaling) at whatever the Moonlight client
-# asked for. gamescope is a nested Wayland client of the root-owned sway session;
-# it runs as the non-root "steam" user (Steam refuses to run as root). When the
+# in SUNSHINE_CLIENT_WIDTH/HEIGHT/FPS.
+#
+# Steam can run in two places, selected by STEAM_GAMESCOPE:
+#   * false (default) — directly on the sway session, as a normal client of
+#     sway's Xwayland. The streamed output is already sized by Hermes, so the
+#     picture is still native; this is the compatible path when gamescope's
+#     Xwayland cannot hand a game a usable GL drawable ("failed to create
+#     drawable") or a game only behaves on a plain desktop.
+#   * true — nested inside gamescope, sized to exactly what the client asked for
+#     (no upscaling), with gamescope's FSR/HDR and per-session refresh clamping.
+# It runs as the non-root "steam" user (Steam refuses to run as root). When the
 # client disconnects Hermes terminates this process group, tearing the session
 # down — that's the "relaunch per connection" model (Steam is not kept warm).
 set -euo pipefail
@@ -23,7 +30,6 @@ warn() { printf '\033[0;33m[hermes-steam][warn]\033[0m %s\n' "$*" >&2; }
 log "=== session start $(date '+%F %T %Z') ==="
 
 command -v steam >/dev/null 2>&1     || { warn "steam not installed"; exit 0; }
-command -v gamescope >/dev/null 2>&1 || { warn "gamescope not installed"; exit 0; }
 id steam >/dev/null 2>&1             || { warn "no 'steam' user"; exit 0; }
 [ "${AUTOSTART_STEAM:-true}" = "true" ] || { log "AUTOSTART_STEAM=false"; exit 0; }
 [ -n "${WAYLAND_DISPLAY:-}" ]        || { warn "no Wayland session"; exit 1; }
@@ -74,6 +80,44 @@ elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     warn "dbus-run-session missing: Steam's SteamRT3 launcher will fail without a session bus"
 fi
 
+# Where Steam runs (see the header): "false" = directly on the sway session,
+# "true" = nested inside gamescope.
+STEAM_GAMESCOPE="${STEAM_GAMESCOPE:-false}"
+
+# Ask sway which X display its Xwayland ended up on. Steam's UI is X11, and the
+# display number is not fixed (sway takes the first free one, which shifts
+# depending on whether anything else already holds :0), so a DISPLAY inherited
+# from the container environment can point nowhere. "swaymsg exec" runs with the
+# compositor's own environment, which has the right DISPLAY.
+sway_x_display() {
+    [ -n "${SWAYSOCK:-}" ] && command -v swaymsg >/dev/null 2>&1 || return 1
+    out="/tmp/.hermes-xdisplay.$$"
+    rm -f "${out}"
+    swaymsg -q exec "printf %s \"\$DISPLAY\" > ${out}" >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 20); do
+        if [ -s "${out}" ]; then
+            sed -n '1p' "${out}"
+            break
+        fi
+        sleep 0.05
+    done
+    rm -f "${out}"
+}
+
+COMPOSITOR_CMD=()
+XENV=()
+if [ "${STEAM_GAMESCOPE}" = "true" ]; then
+    command -v gamescope >/dev/null 2>&1 || { warn "gamescope not installed"; exit 0; }
+    COMPOSITOR_CMD=(gamescope -W "${W}" -H "${H}" -r "${R}" -f -e --)
+    XENV=(XDG_CURRENT_DESKTOP=gamescope)
+    log "compositor: gamescope ${W}x${H}@${R}"
+else
+    xdisp="$(sway_x_display 2>/dev/null || true)"
+    [ -n "${xdisp}" ] || xdisp="${DISPLAY:-:0}"
+    XENV=(DISPLAY="${xdisp}" XDG_CURRENT_DESKTOP=sway)
+    log "compositor: sway (Steam on the session directly, DISPLAY=${xdisp})"
+fi
+
 # Big Picture minimizes itself as soon as it loses focus — i.e. the moment a game
 # window takes over. Inside this nested gamescope that looks exactly like "the
 # game crashed and the stream fell back to the desktop": the game keeps running
@@ -87,11 +131,11 @@ exec runuser -u steam -- env \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
-    XDG_CURRENT_DESKTOP=gamescope \
+    "${XENV[@]}" \
     SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
-    gamescope -W "${W}" -H "${H}" -r "${R}" -f -e -- \
+    "${COMPOSITOR_CMD[@]}" \
     bash -c '
         delay=2; max=60
         while :; do

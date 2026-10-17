@@ -272,14 +272,16 @@ How it works and what to know:
 
 - **Per-session launch (native resolution).** "Steam Big Picture" is registered
   as a Hermes app, not a boot-time autostart. When a client streams it, Hermes
-  runs `gamescope … -- steam -gamepadui` at the stream's **negotiated
-  resolution/refresh** (`SUNSHINE_CLIENT_WIDTH`/`HEIGHT`/`FPS`), so the picture
-  is rendered natively for whatever the Moonlight client asked for — no
-  upscaling. gamescope is a nested Wayland client, so its fullscreen window is
-  scanned out to the captured `Virtual-1` output. When the client disconnects
-  Hermes tears the session down, so Steam is **relaunched fresh per connection**
-  (it is not kept warm). Set `AUTOSTART_STEAM=false` to leave the app
-  unregistered and boot to the plain desktop instead.
+  runs `steam -gamepadui` **directly on the sway session**, at the stream's
+  **negotiated resolution/refresh** (`SUNSHINE_CLIENT_WIDTH`/`HEIGHT`/`FPS` —
+  Hermes sizes the `Virtual-1` output to it, so the picture is native, no
+  upscaling). Set `STEAM_GAMESCOPE=true` to run it nested inside gamescope
+  instead, which adds its own resolution/refresh clamping, FSR and HDR at the
+  price of one more compositing layer — and of gamescope's Xwayland, from which
+  some native Linux ports cannot get a usable GL drawable (`failed to create
+  drawable` in the game log). Either way the session is **relaunched fresh per
+  connection** (Steam is not kept warm); set `AUTOSTART_STEAM=false` to leave the
+  app unregistered and boot to the plain desktop instead.
 - **First run is slower.** Because Steam starts fresh each connection, the very
   first stream re-runs Steam's bootstrap ("Setting up Steam content"). That data
   lives in `/config/steam` (below), so every subsequent connection comes up fast.
@@ -295,9 +297,10 @@ How it works and what to know:
   only the plain desktop.
 - **Big Picture must not minimize itself.** `SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0` is
   exported by the per-session launcher. Without it, Big Picture minimizes the
-  moment a game window takes focus; gamescope then has no focused window to show
-  and paints its root window, so the stream falls back to the desktop while the
-  game keeps running in the background (its `Gamescope WSI` surface stays alive).
+  moment a game window takes focus; in gamescope mode it then has no focused
+  window to show and paints its root window, so the stream falls back to the
+  desktop while the game keeps running in the background (its `Gamescope WSI`
+  surface stays alive).
   See "Big Picture Mode minimizes itself after losing focus" in the ArchWiki
   Steam/Troubleshooting page.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
@@ -349,6 +352,7 @@ denied`.
 | `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |
+| `STEAM_GAMESCOPE`  | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
 | `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
 | `HERMES_CONFIG`    | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
 

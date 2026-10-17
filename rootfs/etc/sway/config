@@ -66,6 +66,13 @@ exec_always dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CUR
 # X11 application support. Toggled by ENABLE_XWAYLAND (enable/disable).
 __XWAYLAND__
 
+# STEAM_GAMESCOPE=false (the default) runs Steam directly on this session, so Big
+# Picture is an ordinary X11 window here — pin it fullscreen. With
+# STEAM_GAMESCOPE=true sway only ever sees gamescope's own Wayland surface, so
+# these rules are inert.
+for_window [class="^steam$"] fullscreen enable
+for_window [class="^Steam$"] fullscreen enable
+
 # --- desktop keybindings ----------------------------------------------------
 # A minimal but usable desktop for when the plain Wayland session (not Steam) is
 # streamed. Super is the modifier; foot is the terminal and wofi the app menu
