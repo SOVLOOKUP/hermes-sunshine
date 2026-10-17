@@ -69,11 +69,10 @@ TZ_ENV=()
 # sandbox shares, so both the launcher service (outside) and the client (inside)
 # can reach it. dbus-run-session tears the bus down with the session.
 # Always start our own bus, even when DBUS_SESSION_BUS_ADDRESS is already set.
-# That inherited address is not ours to use: with COMPOSITOR=kwin the entrypoint
-# starts a root-owned bus for KWin/KScreen and exports it, and the steam user
-# cannot connect to that socket. When KWin then falls back to sway the dead-for-us
-# address is still exported, and trusting it made Steam exit 125 in a loop.
-# dbus-run-session overrides the variable for its children, so the SteamRT3
+# That inherited address is not ours to use: it belongs to the session root
+# started (an earlier design ran a separate bus for the compositor), and the
+# steam user cannot connect to that socket. Trusting it made Steam exit 125 in a
+# loop. dbus-run-session overrides the variable for its children, so the SteamRT3
 # launcher service always gets a bus it can actually reach.
 DBUS_WRAP=()
 if command -v dbus-run-session >/dev/null 2>&1; then
@@ -133,10 +132,9 @@ fi
 # Mode minimizes itself after losing focus" in the ArchWiki Steam/Troubleshooting
 # page. Comments must stay OUTSIDE the list below — a '#' anywhere inside a
 # backslash-continued command swallows the rest of it.
-# X11 auth: KWin starts Xwayland with its own cookie, which the unprivileged
-# steam user cannot read; the entrypoint publishes a readable copy and
-# exports XAUTHORITY. sway runs Xwayland without access control, so this is
-# simply empty there.
+# X11 auth: sway's Xwayland runs without access control, so XAUTHORITY stays
+# unset and X11 clients (Steam) connect without a cookie. Forward it only when
+# something in the environment did set it.
 XAUTH_ENV=()
 [ -n "${XAUTHORITY:-}" ] && XAUTH_ENV=(XAUTHORITY="${XAUTHORITY}")
 

@@ -28,11 +28,6 @@ LABEL org.opencontainers.image.title="hermes-sunshine" \
 ARG HERMES_REPO=MrOz59/Hermes
 ARG HERMES_REF=latest
 ARG USE_CN_MIRROR=true
-# KWin is the default session compositor (COMPOSITOR=kwin): it is the only
-# session in this image that can drive HDR, which Hermes validates on KWin.
-# Build with WITH_KWIN=false to drop the KDE layer and fall back to sway.
-ARG WITH_KWIN=true
-
 ENV LANG=C.UTF-8 \
     XDG_RUNTIME_DIR=/tmp/runtime \
     HOME=/config \
@@ -43,8 +38,7 @@ ENV LANG=C.UTF-8 \
     START_COMPOSITOR=true \
     START_PIPEWIRE=true \
     START_AVAHI=true \
-    ENABLE_XWAYLAND=true \
-    COMPOSITOR=kwin
+    ENABLE_XWAYLAND=true
 
 # Configure mirrors for runtime stage (includes cachyos-v3-mirrorlist)
 RUN set -eu; \
@@ -72,9 +66,10 @@ RUN sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf
 RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
 # Install all packages in a single layer with BuildKit cache mounts
-# WITH_KWIN=true adds the KDE/KWin layer used by COMPOSITOR=kwin (the HDR
-# experiment). It stays out of the default image: sway + Hermes is the
-# shipped path, KWin is only needed where HDR must be driven.
+# sway (wlroots) is the session compositor. It renders on the real GPU
+# (WLR_RENDER_DRM_DEVICE) while scanning out on the Hermes-KMS card, which is the
+# only combination that streams smoothly here, and sway >= 1.12 is also what
+# drives HDR on the virtual output.
 RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     set -eu; \
     pacman -Sy --noconfirm; \
@@ -90,7 +85,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
     pacman -S --noconfirm --needed \
-    curl libva-utils dbus mesa sway seatd xorg-xwayland xorg-xauth xorg-xdpyinfo xorg-xhost \
+    curl libva-utils dbus mesa sway seatd xorg-xwayland xorg-xauth xorg-xdpyinfo \
     wl-clipboard xclip foot wofi jq \
     pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
     steam gamescope noto-fonts noto-fonts-cjk \
@@ -101,9 +96,6 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     for g in video render audio input seat; do \
     getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
-    if [ "${WITH_KWIN}" = "true" ]; then \
-    pacman -Sy --noconfirm --needed kwin kscreen; \
-    fi; \
     yes | pacman -Scc; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 

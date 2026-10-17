@@ -224,7 +224,7 @@ launch_sway() {
     local pid=$! sock="" _
     for _ in $(seq 1 60); do
         kill -0 "${pid}" 2>/dev/null || break
-        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' ! -name 'wayland-kwin' 2>/dev/null | head -n1 || true)"
+        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' 2>/dev/null | head -n1 || true)"
         [ -n "${sock}" ] && break
         sleep 0.25
     done
@@ -243,178 +243,6 @@ launch_sway() {
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
-    return 1
-}
-
-# Start kwin_wayland as the session compositor instead of sway (COMPOSITOR=kwin).
-# KWin is the compositor Hermes' HDR path is validated against: it drives the
-# virtual output through KScreen, so a Hermes-KMS 0.4.0 loaded with hdr_enable=1
-# color_depth=10 can hand PQ/BT.2020 frames to Hermes 0.6.0. sway has no HDR
-# output path, which is why this exists. Opt-in and experimental: HDR is not
-# validated end to end inside a container yet, so any failure here falls back to
-# sway rather than leaving the container without a compositor.
-launch_kwin() {
-    command -v kwin_wayland >/dev/null 2>&1 \
-        || { warn "kwin_wayland not installed (rebuild with WITH_KWIN=true)"; return 1; }
-    local kwin_bin
-    kwin_bin="$(command -v kwin_wayland)"
-    local sock="${KWIN_SOCKET:-wayland-kwin}"
-    # A previous run (or a crash) can leave the socket file behind; a stale file
-    # would both fool the wait loop and be picked up by sway's socket discovery.
-    rm -f "${XDG_RUNTIME_DIR}/${sock}"
-
-    # KWin publishes outputs over D-Bus (org.kde.KScreen / org.kde.KWin). Hermes
-    # runs as root, outside KWin's process tree, so both need one shared session
-    # bus instead of each autolaunching a private one.
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
-        rm -f "${XDG_RUNTIME_DIR}/bus"
-        dbus-daemon --session --fork --nopidfile \
-            --address="unix:path=${XDG_RUNTIME_DIR}/bus" >/dev/null 2>&1 || true
-        if [ -S "${XDG_RUNTIME_DIR}/bus" ]; then
-            export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
-            log "session D-Bus for KWin at ${DBUS_SESSION_BUS_ADDRESS}"
-        else
-            warn "no session D-Bus; KScreen cannot publish the virtual output to Hermes"
-        fi
-    fi
-
-    # --drm selects the real KMS backend (not --virtual, whose output goes to a
-    # fake framebuffer nothing captures). KWIN_DRM_DEVICES pins it to the
-    # Hermes-KMS card, which is not the render GPU; without it KWin picks the
-    # first DRM device it finds and scans out to the wrong card.
-    # Scoped to KWin's own environment: if it fails and we fall back to sway, the
-    # session must not inherit a KDE desktop identity.
-    # A renderer override meant for sway (MESA_LOADER_DRIVER_OVERRIDE=zink,
-    # GALLIUM_DRIVER=...) must not reach KWin: zink is a Vulkan-backed Gallium
-    # driver, and when it cannot pick a physical device Mesa fails with
-    # "ZINK: failed to choose pdev" and KWin never gets a GL context - the
-    # output still gets enabled, but no frame is ever committed to it, which
-    # Hermes then reports as "Virtual-1 did not commit the requested SDR
-    # scanout before capture". Strip them for KWin's own process only.
-    local render_env=""
-    for v in MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_ALWAYS_SOFTWARE; do
-        [ -n "${!v:-}" ] && render_env+="${v}=${!v} "
-    done
-    [ -n "${render_env}" ] \
-        && warn "not passing render env to KWin (${render_env}): KWin needs its own GL/Vulkan context"
-
-    # KWin logs through Qt, which drops debug output unless it is told to write to
-    # stderr: without these two variables /var/log/kwin.log only holds Mesa's
-    # driver chatter (three "ZINK: failed to choose pdev" lines and nothing else),
-    # which says nothing about why an output was never scanned out.
-    # KWin's atomic commit state machine issues a TEST_ONLY commit that carries
-    # mode properties without DRM_MODE_ATOMIC_ALLOW_MODESET when it believes no
-    # modeset is pending. The kernel rejects that with -EINVAL ("requires full
-    # modeset") and KWin retries forever: "Modeset failed: Invalid argument",
-    # no frame is ever scanned out. The legacy (drmModeSetCrtc) path has no such
-    # state machine and sets the mode correctly on the Hermes-KMS card, so use it
-    # for KWin by default; set KWIN_DRM_NO_AMS=0 to force atomic back on.
-    # KWin starts Xwayland without an -auth argument, so the X server falls back
-    # to $XAUTHORITY (or ~/.Xauthority) for its cookie file. Neither exists in
-    # this container, and anything under /root is root-only anyway, so the steam
-    # user cannot authenticate and Steam dies with "unable to open a connection
-    # to X". Pre-create a shared cookie file, hand it to Xwayland through KWin's
-    # inherited environment, and let the launcher pass the same path to steam.
-    # The file is world-readable on purpose: it only unlocks the throwaway
-    # Xwayland instance inside this container.
-    local xauth_file=/tmp/.hermes-xauthority
-    local xauth_hex xauth_pos
-    xauth_hex="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    : > "${xauth_file}"
-    for xauth_pos in 0 1 2 3 4 5 6 7 8 9; do
-        # Xauthority entry: FamilyWild, empty address, display number, cookie
-        # name, then the 16-byte cookie; every field is length-prefixed with a
-        # big-endian u16. Hand-written so the image does not need xorg-xauth.
-        printf '\377\377\000\000\000\001%s\000\022MIT-MAGIC-COOKIE-1\000\020' \
-            "${xauth_pos}" >> "${xauth_file}"
-        local xauth_i
-        for ((xauth_i = 0; xauth_i < 32; xauth_i += 2)); do
-            printf "\\x${xauth_hex:xauth_i:2}" >> "${xauth_file}"
-        done
-    done
-    chmod 644 "${xauth_file}"
-    export XAUTHORITY="${xauth_file}"
-
-    # KWin starts Xwayland without -auth and blanks XAUTHORITY for it, so the
-    # server falls back to $HOME/.Xauthority (HOME is /root here). Keeping a copy
-    # of the same cookie there gives the server auth data the steam user can
-    # satisfy, without touching KWin's command line: passing
-    # --xwayland-xauthority did make KWin hand Xwayland "-auth <file>", but
-    # Xwayland then exited immediately (KWin logged nothing), which lost X
-    # entirely. Diagnostic tools (xorg-xauth/xorg-xdpyinfo) are in the image, so
-    # "xdpyinfo -display :0" as steam tells us definitively whether auth works.
-    install -m 600 "${xauth_file}" /root/.Xauthority 2>/dev/null \
-        || cp -f "${xauth_file}" /root/.Xauthority 2>/dev/null || true
-
-    # A restarted container keeps /tmp, so sockets from the previous Xwayland
-    # survive it. They are dead (the server is gone) but still sort first, which
-    # used to leave DISPLAY pointing at a socket nothing listens on.
-    rm -f /tmp/.X11-unix/X* 2>/dev/null || true
-
-    KWIN_DRM_NO_AMS="${KWIN_DRM_NO_AMS:-1}" \
-    # The virtual card has no render engine, so KWin composites it with
-    # llvmpipe unless it is also given the real GPU. KWin builds a render
-    # device list from the DRM devices it is handed and copies buffers with
-    # MultiGpuSwapchain; passing the amdgpu card as a second device lets it
-    # render on hardware and scan out through Hermes-KMS. It cannot take DRM
-    # master there (the host owns that card), so this is opt-in via env.
-    KWIN_DRM_DEVICES="${KWIN_DRM_DEVICES:-${HERMES_KMS_CARD}}" \
-    XDG_SESSION_TYPE=wayland \
-    XDG_CURRENT_DESKTOP=KDE \
-    XDG_SESSION_DESKTOP=KDE \
-    QT_FORCE_STDERR_LOGGING=1 \
-    QT_LOGGING_RULES="${KWIN_LOGGING_RULES:-kwin_*.debug=true}" \
-    env -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LIBGL_ALWAYS_SOFTWARE \
-    kwin_wayland --drm --socket "${sock}" --xwayland \
-        --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
-    local pid=$! sockfile="" _
-    for _ in $(seq 1 160); do
-        kill -0 "${pid}" 2>/dev/null || break
-        [ -S "${XDG_RUNTIME_DIR}/${sock}" ] && { sockfile="${XDG_RUNTIME_DIR}/${sock}"; break; }
-        sleep 0.25
-    done
-    if [ -n "${sockfile}" ] && kill -0 "${pid}" 2>/dev/null; then
-        PIDS+=("${pid}")
-        export WAYLAND_DISPLAY="${sock}"
-        log "kwin_wayland up on ${HERMES_KMS_CARD} (WAYLAND_DISPLAY=${sock})"
-        # Which GPU KWin actually renders on decides whether streaming is usable:
-        # the Hermes-KMS card has no render engine, so picking it means llvmpipe
-        # and a very slow 4K desktop. KWin logs its choice a moment after the
-        # Wayland socket appears, so wait briefly and read the decision instead
-        # of grepping for stray Mesa warnings (those also appear when the probe
-        # fails on the virtual card but rendering still happens on the real GPU).
-        local primary="" _
-        for _ in $(seq 1 20); do
-            primary="$(grep -a "as the primary GPU" "${KWIN_LOG:-/var/log/kwin.log}" 2>/dev/null | tail -n1 || true)"
-            [ -n "${primary}" ] && break
-            sleep 0.25
-        done
-        case "${primary}" in
-            *llvmpipe*)
-                log "note: KWin renders with llvmpipe (software) on ${HERMES_KMS_CARD}; 4K will be slow"
-                log "note: pass KWIN_DRM_DEVICES=/dev/dri/card0:/dev/dri/card1 to render on the real GPU (scanout through Hermes-KMS does not work that way yet)"
-                ;;
-            *renderD*|*card*)
-                log "KWin renders on hardware: ${primary#*Chose }"
-                ;;
-            *)
-                log "note: KWin did not report a primary GPU (see ${KWIN_LOG:-/var/log/kwin.log})"
-                ;;
-        esac
-        return 0
-    fi
-    kill "${pid}" 2>/dev/null || true
-    rm -f "${XDG_RUNTIME_DIR}/${sock}"
-    # An execve() failure here is almost always a capability mismatch: a binary
-    # carrying file capabilities (KWin ships cap_sys_nice for realtime
-    # scheduling) cannot run when that capability is outside the container's
-    # bounding set, and execve fails with EPERM ("Operation not permitted").
-    warn "kwin_wayland (${kwin_bin}) did not publish a Wayland socket; see ${KWIN_LOG:-/var/log/kwin.log}"
-    if command -v getcap >/dev/null 2>&1; then
-        { getcap "${kwin_bin}" || true; ls -l "${kwin_bin}" || true; } >&2
-        warn "if file capabilities are listed above, add 'cap_add: [SYS_NICE]' to the container"
-    fi
-    tail -n 25 "${KWIN_LOG:-/var/log/kwin.log}" >&2 || true
     return 1
 }
 
@@ -496,34 +324,21 @@ start_compositor() {
     export XDG_SESSION_TYPE=wayland
     export XDG_CURRENT_DESKTOP=sway
 
-    local started="false"
-    local compositor_kind=""
-
-    # Opt-in KWin session (HDR experiment). Only meaningful on the Hermes-KMS
-    # DRM path; everything here falls through to sway when it does not come up.
-    if [ "${COMPOSITOR:-kwin}" = "kwin" ]; then
-        if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
-            log "COMPOSITOR=kwin: starting kwin_wayland on ${HERMES_KMS_CARD}"
-            setup_kms_env
-            if launch_kwin; then
-                started="true"
-                compositor_kind="kwin"
-                KMS_ZEROCOPY="true"
-                export XDG_CURRENT_DESKTOP=KDE
-            else
-                warn "KWin session failed; falling back to sway (set COMPOSITOR=sway to skip this attempt)"
-            fi
-        else
-            warn "KWin needs the Hermes-KMS DRM path; falling back to sway"
-        fi
+    # Older compose files selected the session with COMPOSITOR=kwin. That
+    # compositor is gone (it could not do hardware compositing on the virtual
+    # card), so an inherited value must not look like it still has an effect.
+    if [ -n "${COMPOSITOR:-}" ]; then
+        warn "COMPOSITOR=${COMPOSITOR} is ignored: this image always runs sway (KWin was removed)"
+        unset COMPOSITOR
     fi
 
-    if [ "${started}" != "true" ] && [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
+    local started="false"
+
+    if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
         log "starting sway on the Hermes-KMS DRM output (${HERMES_KMS_CARD})"
         setup_kms_env
         if launch_sway; then
             started="true"
-            compositor_kind="kms"
             KMS_ZEROCOPY="true"
             log "Wayland session up on the Hermes-KMS output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
         else
@@ -542,7 +357,6 @@ start_compositor() {
         setup_headless_env
         if launch_sway; then
             started="true"
-            compositor_kind="headless"
             log "Wayland session up on a headless output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
         fi
     fi
@@ -553,82 +367,7 @@ start_compositor() {
         return 1
     fi
 
-    if [ "${compositor_kind}" = "kwin" ]; then
-        # KWin owns Virtual-1 through KScreen. Nothing to force here: Hermes
-        # enables the connector per stream and sets the mode through KScreen, the
-        # same contract it has with KWin on a normal desktop. Just bring Xwayland
-        # up as a usable DISPLAY for X11 apps and record what KScreen reports.
-        #
-        # Readiness is probed by speaking X protocol, not by looking for the
-        # socket file: KWin binds /tmp/.X11-unix/X0 itself and only then execs
-        # Xwayland, so the file appears early and stays behind if Xwayland dies.
-        local xs="" _ x_ready=false
-        for _ in $(seq 1 150); do
-            xs="$(ls -t /tmp/.X11-unix/X* 2>/dev/null | head -n1 || true)"
-            if [ -n "${xs}" ] && command -v xhost >/dev/null 2>&1 \
-                    && DISPLAY=":${xs##*X}" timeout 5 xhost >/dev/null 2>&1; then
-                x_ready=true
-                break
-            fi
-            sleep 0.1
-        done
-        if [ "${x_ready}" = true ]; then
-            export DISPLAY=":${xs##*X}"
-            log "KWin Xwayland answering on DISPLAY=${DISPLAY}"
-            # KWin starts Xwayland with its own -auth cookie and blanks
-            # XAUTHORITY for it. Publish a readable copy anyway: an X client that
-            # does have a cookie path is one failure mode less.
-            local p auth=""
-            for p in /proc/[0-9]*; do
-                [ "$(cat "${p}/comm" 2>/dev/null)" = "Xwayland" ] || continue
-                auth="$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null \
-                    | sed -n 's/.* -auth \([^ ]*\).*/\1/p')"
-                [ -n "${auth}" ] && break
-            done
-            if [ -n "${auth}" ] && [ -r "${auth}" ]; then
-                cp -f "${auth}" /tmp/.hermes-xauthority 2>/dev/null || true
-                chmod 644 /tmp/.hermes-xauthority 2>/dev/null || true
-                export XAUTHORITY=/tmp/.hermes-xauthority
-                log "Xwayland auth published to ${XAUTHORITY} for the steam user"
-            fi
-            # Xwayland's access control list holds exactly one entry,
-            # "SI:localuser:root" - the uid it runs as. That is why root can
-            # connect with no cookie at all while the steam user is turned away
-            # with "Invalid MIT-MAGIC-COOKIE-1 key" even when it reads the very
-            # same cookie file: the server never looks at our file. Grant the
-            # user explicitly; root may do this because it is the trusted uid.
-            local granted=false
-            for _ in $(seq 1 60); do
-                if DISPLAY="${DISPLAY}" xhost +SI:localuser:steam >/dev/null 2>&1; then
-                    granted=true
-                    break
-                fi
-                sleep 0.25
-            done
-            if [ "${granted}" = true ]; then
-                log "X: granted the steam user access to ${DISPLAY} (xhost SI:localuser)"
-            elif DISPLAY="${DISPLAY}" xhost +local: >/dev/null 2>&1; then
-                log "X: granted all local users access to ${DISPLAY} (xhost +local:)"
-            else
-                warn "X: could not grant the steam user access to ${DISPLAY}; Steam may fail with 'unable to open a connection to X'"
-            fi
-        else
-            # KWin binds the X11 listen sockets before it execs Xwayland, so a
-            # socket file alone is not proof of a working X server: a crashed
-            # Xwayland leaves the sockets behind and DISPLAY points at nothing.
-            warn "KWin is running but Xwayland never answered (socket=${xs:-none})"
-            warn "X11 clients (Steam) will fail with 'unable to open a connection to X'"
-        fi
-        if command -v kscreen-doctor >/dev/null 2>&1; then
-            if kscreen-doctor -o > /var/log/kscreen-doctor.log 2>&1; then
-                log "kscreen output state written to /var/log/kscreen-doctor.log"
-            else
-                warn "kscreen-doctor failed; Hermes may not be able to set the virtual output (see /var/log/kscreen-doctor.log)"
-            fi
-        else
-            warn "kscreen-doctor missing (rebuild with WITH_KWIN=true); Hermes cannot set the virtual output mode"
-        fi
-    elif [ "${compositor_kind}" = "kms" ]; then
+    if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
         # sway is on a drm,headless multi-backend: the DRM backend adopts the
         # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
         # by headless_mode in sunshine.conf) and Hermes reads that connector

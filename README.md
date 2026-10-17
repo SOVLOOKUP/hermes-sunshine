@@ -34,7 +34,7 @@ They aim at different trade-offs:
 
 |                   | **Hermes-Sunshine** (this image)                                                               | **Wolf** (Games-on-Whales)                                   | **steam-headless**                                                  |
 | ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| Display backend   | **Wayland** (KWin by default, sway fallback) on a real **KMS** virtual card                                      | **Wayland** (custom micro-compositor)                        | **X11** (Xorg virtual output)                                       |
+| Display backend   | **Wayland** (sway/wlroots) on a real **KMS** virtual card                                                      | **Wayland** (custom micro-compositor)                        | **X11** (Xorg virtual output)                                       |
 | Capture path      | **Zero-copy** DMA-BUF from the `hermes_kms` scanout into the encoder                           | Raw compositor framebuffer → GStreamer encode                | Sunshine grabs the X11 framebuffer                                  |
 | Client resolution | Rendered at the client's **negotiated native** res per session — no upscaling, no dummy plug   | Adaptive per session                                         | Fixed virtual output; adaptive res needs xrandr overlays            |
 | Audio             | **PipeWire** virtual sink                                                                      | PulseAudio (embedded / sidecar)                              | PulseAudio                                                          |
@@ -133,27 +133,27 @@ pairing as untested, so validate it before deploying.
 
 Two things still gate it:
 
-- the compositor has to drive the output in HDR (upstream validates on KDE/KWin;
-  a compositor without an HDR output path keeps the stream SDR regardless of how
-  the module is loaded), and
+- the compositor has to drive the output in HDR — the session compositor is the
+  one that owns the connector, so a compositor without an HDR output path keeps
+  the stream SDR no matter how the module is loaded. sway does have one
+  (`output <name> hdr on`, sway ≥ 1.12: BT2020 primaries + PQ, implies a 10-bit
+  render surface), which is what this image uses, and
 - the module and the container must be the matching pair (0.4.0 ↔ Hermes 0.6.0,
   UAPI 14) — a 0.3.x module has no `hdr_enable` at all and UAPI 9 without the
   colour metadata.
 
-The compositor has to drive HDR for this to reach the stream. That is why KWin is
-the default session: sway has no HDR output path, and a nested gamescope cannot
-provide one either (the session compositor is the one scanning out to
-`Virtual-1`).
-
-The default session is already KWin, so HDR only needs:
+So HDR needs exactly two things:
 
 - Hermes-KMS **0.4.0** loaded with `hdr_enable=1 color_depth=10` (the module flags
   that pairing as untested — validate it), and
 - a Moonlight client that asked for HDR.
 
-Diagnostics land in `/var/log/kwin.log` and `/var/log/kscreen-doctor.log`. The
-KWin path is still experimental: it has not been validated end to end inside the
-container yet, and `COMPOSITOR=sway` remains the fallback.
+The entrypoint reads `hdr_enable` from the loaded module and, when it is `Y`,
+writes `output "Virtual-1" hdr on` into the sway config (`/run/hermes/sway.config`);
+with an SDR module that line is not emitted at all, so an older module is never
+asked for HDR it cannot scan out. Rendering stays on the real GPU — HDR costs
+nothing in the capture path. Hermes then logs `Display is HDR: true`, `Color
+depth: 10-bit` and `Virtual-1 scanout confirmed HDR`.
 
 To make the module load **automatically on system boot**:
 
@@ -176,7 +176,7 @@ flow is:
 1. `hermes_kms.ko` on the host exposes a virtual DRM card whose connector is
    named `Virtual-1` (the driver's internal output label is `HERMES-1`), plus a
    render node.
-2. **the session compositor** (KWin by default, `COMPOSITOR=sway` for wlroots) takes DRM master on that card and scans the
+2. **sway** (wlroots) takes DRM master on that card and scans the
    desktop out to the `Virtual-1` output; a **real GPU** does the rendering.
 3. **Hermes** opens the `hermes_kms` render node (masterless) and pulls the
    scanout as DMA-BUFs, which the real GPU encodes — the frame never leaves the
@@ -338,48 +338,17 @@ How it works and what to know:
   surface stays alive).
   See "Big Picture Mode minimizes itself after losing focus" in the ArchWiki
   Steam/Troubleshooting page.
-- **Compositor: KWin by default, sway as fallback.** `COMPOSITOR=kwin` (default)
-  starts `kwin_wayland --drm` on the Hermes-KMS card, pinned with
-  `KWIN_DRM_DEVICES`, with one shared session D-Bus so KScreen can publish the
-  output to Hermes. KWin is the session Hermes' HDR path is validated against
-  (see [HDR (module 0.4.0 / Hermes 0.6.0)](#hdr-module-040--hermes-060)) and the
-  only one in this image that can drive HDR. It is still experimental: if it does
-  not come up, the entrypoint falls back to sway and logs why. Set
-  `COMPOSITOR=sway` to run the wlroots session Hermes drives over
-  wlr-output-management, and build with `--build-arg WITH_KWIN=false` to drop the
-  KDE layer entirely (that image always runs sway). KWin needs
-  `cap_add: [SYS_NICE]`: its binary carries that file capability, and `execve`
-  refuses to run it when the capability is outside the container's bounding set
-  ("Operation not permitted"), which surfaces as a KWin→sway fallback. Two more
-  KWin-specific quirks are handled automatically: the session runs with
-  `KWIN_DRM_NO_AMS=1` (KWin's atomic commit state machine sends a TEST_ONLY
-  commit with mode properties but without `ALLOW_MODESET`, which this driver's
-  kernel rejects with `Modeset failed: Invalid argument` in a loop — the legacy
-  `drmModeSetCrtc` path works), the Xwayland auth cookie is copied to
-  `/tmp/.hermes-xauthority` and exported as `XAUTHORITY`. The cookie alone is not
-  enough: the X server trusts local connections running as its own uid (root), so
-  the unprivileged `steam` user is refused even with a byte-identical cookie --
-  the container therefore runs `xhost +SI:localuser:steam` once Xwayland is up
-  (falling back to `xhost +local:`), otherwise Steam dies with "unable to open a
-  connection to X".
-
-  Two performance/HDR limits are inherent to the virtual card and worth knowing
-  before debugging them:
-
-  * Hermes-KMS has no render engine, so KWin composites with llvmpipe unless it
-    is handed a real GPU (`KWIN_DRM_DEVICES=/dev/dri/card0:/dev/dri/card1`). That
-    makes KWin render on the amdgpu card, but its cross-GPU path then cannot get
-    the frame onto `Virtual-1` — Hermes reports "did not commit the requested SDR
-    scanout before capture". sway does support the split
-    (`WLR_DRM_DEVICES=card1` + `WLR_RENDER_DRM_DEVICE=renderD128`) and streams
-    smoothly, but sway/wlroots does not set the HDR colours on the connector.
-  * HDR is not one of them. Load the module with `hdr_enable=1 color_depth=10`
-    and the entrypoint adds `output "Virtual-1" hdr on` to the sway config
-    (sway >= 1.12 sets BT2020 primaries and PQ on the connector, which implies a
-    10-bit render surface). Hermes then reports "Display is HDR: true" and
-    captures HDR over the same zero-copy path, with the real GPU doing the
-    rendering. With an SDR module the directive is not emitted at all, so an
-    older module is never asked for HDR it cannot scan out.
+- **Compositor: sway (wlroots).** The entrypoint starts `sway` on the Hermes-KMS
+  card with `WLR_DRM_DEVICES=<virtual card>` for scanout and
+  `WLR_RENDER_DRM_DEVICE=<render node>` for rendering, so the log reads
+  "a **real GPU** does the rendering" literally: the virtual card has no render
+  engine, and a compositor that renders on it falls back to llvmpipe (software
+  compositing — fine for a menu, hopeless at 4K). wlroots is the only
+  compositor here that supports that split, which is why it is the only session
+  this image ships. Hermes drives the output over `wlr-output-management`.
+  KMS zero-copy capture works because the compositor scans out of the
+  `hermes_kms` render node, and HDR works because sway ≥ 1.12 sets BT2020/PQ
+  on the connector (see [HDR](#hdr-module-040--hermes-060)).
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
@@ -424,12 +393,11 @@ denied`.
 | `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                                                                           |
 | `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                          |
 | `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                               |
-| `START_COMPOSITOR` | `true`                  | Start the Wayland session (KWin by default, see `COMPOSITOR`).                                                                                                                                               |
+| `START_COMPOSITOR` | `true`                  | Start the Wayland session (sway).                                                                                                                                                                           |
 | `START_PIPEWIRE`   | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) for audio capture. Hermes creates and captures its own loopback sink.                                                           |
 | `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |
-| `COMPOSITOR`       | `kwin`                  | Session compositor: `kwin` (`kwin_wayland --drm`, the HDR-capable default) or `sway` (wlroots fallback). Images built with `WITH_KWIN=false` have no KWin and always run sway. |
 | `STEAM_GAMESCOPE`  | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
 | `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
 | `HERMES_CONFIG`    | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |

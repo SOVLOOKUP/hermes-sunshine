@@ -27,11 +27,10 @@ services:
     ipc: host
     cap_add:
       - SYS_ADMIN
-      # KWin ships with file capabilities (cap_sys_nice, for realtime scheduling).
-      # execve() refuses to run a binary whose file capabilities are outside the
-      # container's bounding set, failing with EPERM — visible as
-      # "/usr/sbin/kwin_wayland: Operation not permitted" in the entrypoint log.
-      # It also lets gamescope/PipeWire take RT priorities.
+      # Lets gamescope/PipeWire take realtime priorities inside the container.
+      # execve() also refuses binaries whose file capabilities fall outside the
+      # container's bounding set, so anything installed with cap_sys_nice needs
+      # this here.
       - SYS_NICE
     security_opt:
       - seccomp=unconfined
@@ -91,12 +90,10 @@ services:
     # environment:
     #   TZ: Asia/Shanghai        # set your timezone (required for correct Steam time)
     #   HERMES_KMS: auto         # virtual display: auto | on | off
-    #   COMPOSITOR: kwin         # session compositor: kwin (HDR-capable default)
-    #                            # | sway (wlroots fallback)
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"
     #   DISPLAY_REFRESH: "60"
-    #   START_COMPOSITOR: "true" # Wayland session (KWin by default)
+    #   START_COMPOSITOR: "true" # Wayland session (sway)
     #   START_PIPEWIRE: "true"   # PipeWire audio (+ virtual sink)
     #   START_AVAHI: "true"
     #   ENABLE_XWAYLAND: "true"  # X11 app compatibility
