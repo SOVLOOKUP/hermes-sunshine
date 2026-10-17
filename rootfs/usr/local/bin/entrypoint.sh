@@ -284,10 +284,25 @@ launch_kwin() {
     # first DRM device it finds and scans out to the wrong card.
     # Scoped to KWin's own environment: if it fails and we fall back to sway, the
     # session must not inherit a KDE desktop identity.
+    # A renderer override meant for sway (MESA_LOADER_DRIVER_OVERRIDE=zink,
+    # GALLIUM_DRIVER=...) must not reach KWin: zink is a Vulkan-backed Gallium
+    # driver, and when it cannot pick a physical device Mesa fails with
+    # "ZINK: failed to choose pdev" and KWin never gets a GL context - the
+    # output still gets enabled, but no frame is ever committed to it, which
+    # Hermes then reports as "Virtual-1 did not commit the requested SDR
+    # scanout before capture". Strip them for KWin's own process only.
+    local render_env=""
+    for v in MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER LIBGL_ALWAYS_SOFTWARE; do
+        [ -n "${!v:-}" ] && render_env+="${v}=${!v} "
+    done
+    [ -n "${render_env}" ] \
+        && warn "not passing render env to KWin (${render_env}): KWin needs its own GL/Vulkan context"
+
     KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
     XDG_SESSION_TYPE=wayland \
     XDG_CURRENT_DESKTOP=KDE \
     XDG_SESSION_DESKTOP=KDE \
+    env -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LIBGL_ALWAYS_SOFTWARE \
     kwin_wayland --drm --socket "${sock}" --xwayland \
         --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
     local pid=$! sockfile="" _
@@ -300,6 +315,14 @@ launch_kwin() {
         PIDS+=("${pid}")
         export WAYLAND_DISPLAY="${sock}"
         log "kwin_wayland up on ${HERMES_KMS_CARD} (WAYLAND_DISPLAY=${sock})"
+        # GL init happens before the socket appears, so this is the earliest
+        # point a failed renderer shows up. KWin keeps running without a GPU
+        # context and simply never composites, which is very hard to see later.
+        if grep -qiE "ZINK|failed to choose pdev|no GPU context|OpenGL context" \
+                "${KWIN_LOG:-/var/log/kwin.log}" 2>/dev/null; then
+            warn "KWin has no usable GL/Vulkan context (see ${KWIN_LOG:-/var/log/kwin.log});"
+            warn "the virtual output will be enabled but never scanned out"
+        fi
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
