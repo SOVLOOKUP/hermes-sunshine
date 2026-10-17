@@ -335,6 +335,22 @@ launch_kwin() {
     chmod 644 "${xauth_file}"
     export XAUTHORITY="${xauth_file}"
 
+    # KWin only hands Xwayland an -auth cookie when it is told which file to use.
+    # Without this, Xwayland inherits XAUTHORITY="" and falls back to
+    # /root/.Xauthority, so the steam user cannot authenticate. Probe the option
+    # first: passing an unknown flag would abort KWin and lose the session.
+    local xauth_arg=""
+    if timeout 10 "${kwin_bin}" --help 2>&1 | grep -q -- '--xwayland-xauthority'; then
+        xauth_arg="--xwayland-xauthority ${xauth_file}"
+    else
+        warn "${kwin_bin} does not support --xwayland-xauthority; Xwayland and the steam user will not share an X cookie"
+    fi
+
+    # A restarted container keeps /tmp, so sockets from the previous Xwayland
+    # survive it. They are dead (the server is gone) but still sort first, which
+    # used to leave DISPLAY pointing at a socket nothing listens on.
+    rm -f /tmp/.X11-unix/X* 2>/dev/null || true
+
     KWIN_DRM_NO_AMS="${KWIN_DRM_NO_AMS:-1}" \
     KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
     XDG_SESSION_TYPE=wayland \
@@ -343,7 +359,8 @@ launch_kwin() {
     QT_FORCE_STDERR_LOGGING=1 \
     QT_LOGGING_RULES="${KWIN_LOGGING_RULES:-kwin_*.debug=true}" \
     env -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LIBGL_ALWAYS_SOFTWARE \
-    kwin_wayland --drm --socket "${sock}" --xwayland \
+    # shellcheck disable=SC2086  # xauth_arg is a pre-split "--opt path" pair
+    kwin_wayland --drm --socket "${sock}" --xwayland ${xauth_arg} \
         --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
     local pid=$! sockfile="" _
     for _ in $(seq 1 160); do
@@ -515,7 +532,7 @@ start_compositor() {
         # KScreen reports for diagnostics.
         local xs="" _
         for _ in $(seq 1 50); do
-            xs="$(ls /tmp/.X11-unix/X* 2>/dev/null | head -n1 || true)"
+            xs="$(ls -t /tmp/.X11-unix/X* 2>/dev/null | head -n1 || true)"
             [ -n "${xs}" ] && break
             sleep 0.1
         done
