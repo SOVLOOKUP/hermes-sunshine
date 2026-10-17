@@ -373,10 +373,13 @@ How it works and what to know:
     scanout before capture". sway does support the split
     (`WLR_DRM_DEVICES=card1` + `WLR_RENDER_DRM_DEVICE=renderD128`) and streams
     smoothly, but sway/wlroots does not set the HDR colours on the connector.
-  * HDR therefore needs KWin (KScreen + KWin's HDR output) and pays the llvmpipe
-    price: usable around 1080p60, not at 4K. The module must be loaded with
-    `hdr_enable=1 color_depth=10`; Hermes then reports "Display is HDR: true"
-    instead of "streaming SDR".
+  * HDR is not one of them. Load the module with `hdr_enable=1 color_depth=10`
+    and the entrypoint adds `output "Virtual-1" hdr on` to the sway config
+    (sway >= 1.12 sets BT2020 primaries and PQ on the connector, which implies a
+    10-bit render surface). Hermes then reports "Display is HDR: true" and
+    captures HDR over the same zero-copy path, with the real GPU doing the
+    rendering. With an SDR module the directive is not emitted at all, so an
+    older module is never asked for HDR it cannot scan out.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland

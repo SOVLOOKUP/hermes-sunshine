@@ -474,7 +474,16 @@ start_compositor() {
     # afterwards via swaymsg, since the output name depends on the backend).
     local xw="xwayland disable"
     [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
-    sed -e "s/__XWAYLAND__/${xw}/g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
+    # HDR only exists end to end when the module advertises it: the connector
+    # colour properties and 10-bit scanout come from hdr_enable=1 color_depth=10,
+    # and sway >= 1.12 is what sets BT2020/PQ on top of it. Keep the directive out
+    # of the config otherwise, so an SDR module is never asked for HDR.
+    local hdr=""
+    if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+        hdr='output "Virtual-1" hdr on'
+        log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
+    fi
+    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
 
     # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless backend.
     local use_kms="false"

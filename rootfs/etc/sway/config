@@ -40,6 +40,14 @@ output "HEADLESS-1" position 999999 0 resolution 1x1
 workspace 1 output "Virtual-1" "HEADLESS-1"
 output * bg #202020 solid_color
 
+# HDR. Emitted only when the Hermes-KMS module was loaded with
+# hdr_enable=1 color_depth=10 (the entrypoint fills this in). sway 1.12+ then
+# sets BT2020 primaries and the PQ transfer function on the connector and
+# implicitly renders at 10 bit, which is exactly what Hermes-KMS captures as an
+# HDR frame. Without the module flags the hardware cannot scan out HDR, so the
+# directive is left out entirely rather than silently ignored.
+__HDR__
+
 # --- absolute input mapping -------------------------------------------------
 # Touch and pen input Moonlight injects carry coordinates normalised to the
 # streamed output. By default sway spreads absolute input across the whole
