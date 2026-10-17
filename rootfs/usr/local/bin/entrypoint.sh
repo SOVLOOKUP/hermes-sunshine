@@ -317,6 +317,46 @@ write_sway_config() {
     sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
 }
 
+# Ask sway which display its Xwayland ended up on. The number is not fixed: it
+# depends on which display slots were already reserved (see
+# reserve_foreign_x_displays), so a hardcoded DISPLAY can point at nothing.
+sway_x_display() {
+    [ -n "${SWAYSOCK:-}" ] && command -v swaymsg >/dev/null 2>&1 || return 1
+    local out="/tmp/.hermes-xdisplay.$$" _
+    rm -f "${out}"
+    swaymsg -q exec "printf %s \"\$DISPLAY\" > ${out}" >/dev/null 2>&1 || return 1
+    for _ in $(seq 1 20); do
+        if [ -s "${out}" ]; then
+            sed -n '1p' "${out}"
+            break
+        fi
+        sleep 0.05
+    done
+    rm -f "${out}"
+}
+
+# X11 clients try the abstract socket ("@/tmp/.X11-unix/X<n>") before the
+# filesystem one. With network_mode: host that abstract namespace is shared with
+# every other container on the host, so if anything else runs an X server on :0,
+# clients here connect to *that* server and are refused for lack of its cookie
+# ("unable to open a connection to X"). wlroots only binds the filesystem socket,
+# which is private to this container, so it happily picks the same display number
+# and every X client then talks to the wrong server. Reserve the filesystem slot
+# for each display that already answers on a foreign abstract socket; Xwayland
+# then lands on a number that only this container answers on.
+reserve_foreign_x_displays() {
+    local dir="/tmp/.X11-unix" n
+    mkdir -p "${dir}"
+    # Stale sockets from a previous run in the same container would look like our
+    # own listeners; the display numbers below are recomputed from scratch.
+    rm -f "${dir}"/X[0-9]* 2>/dev/null || true
+    for n in $(grep -aoE '@/tmp/\.X11-unix/X[0-9]+' /proc/net/unix 2>/dev/null \
+            | sed 's/.*X//' | sort -un); do
+        : > "${dir}/X${n}" 2>/dev/null || true
+        log "X: :${n} is answered by another container on the shared network namespace; reserved it"
+    done
+}
+
 start_compositor() {
     # Build the effective sway config from the template (resolution is applied
     # afterwards via swaymsg, since the output name depends on the backend).
@@ -330,6 +370,8 @@ start_compositor() {
         log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
     fi
     write_sway_config "${hdr_on}"
+
+    reserve_foreign_x_displays
 
     # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless backend.
     local use_kms="false"
@@ -449,9 +491,12 @@ start_compositor() {
         fi
     fi
 
-    # Surface the XWayland DISPLAY for X11-only apps launched by the host.
+    # Surface the XWayland DISPLAY for X11-only apps launched by the host,
+    # taking it from sway rather than assuming :0 (see sway_x_display).
     if [ "${ENABLE_XWAYLAND}" = "true" ]; then
-        export DISPLAY="${DISPLAY:-:0}"
+        local xdisp
+        xdisp="$(sway_x_display 2>/dev/null || true)"
+        export DISPLAY="${xdisp:-${DISPLAY:-:0}}"
         log "XWayland enabled (DISPLAY=${DISPLAY}) for X11 application compatibility"
     fi
 }

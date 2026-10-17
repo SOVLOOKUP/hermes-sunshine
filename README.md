@@ -192,6 +192,23 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
+### X11 and `network_mode: host`
+
+X11 clients try the abstract socket (`@/tmp/.X11-unix/X<n>`) before the
+filesystem one, and the abstract namespace follows the **network** namespace,
+which `network_mode: host` shares with every other container on the machine. If
+any other container runs an X server on `:0` (a browser/desktop container, for
+example), every X client here — Steam included — connects to *that* server and is
+refused for lack of its cookie, which shows up as Steam's "Unable to open a
+connection to X" dialog and an immediate `rc=1` loop. wlroots only binds the
+filesystem socket, which is private to the container, so it would pick the same
+display number and never notice.
+
+The entrypoint therefore reserves the filesystem slot for each display that
+already answers on a foreign abstract socket (`/proc/net/unix`), which pushes
+Xwayland onto a display number this container is the only responder for, and
+then exports the `DISPLAY` sway actually reports rather than assuming `:0`.
+
 > **Seat activation in a container.** Driving the DRM output needs an _active_
 > seat session, which a VT-bound seat can only get from a foreground virtual
 > terminal — absent in a container. The entrypoint therefore starts seatd with
