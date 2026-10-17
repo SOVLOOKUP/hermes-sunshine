@@ -526,26 +526,28 @@ start_compositor() {
     if [ "${compositor_kind}" = "kwin" ]; then
         # KWin owns Virtual-1 through KScreen. Nothing to force here: Hermes
         # enables the connector per stream and sets the mode through KScreen, the
-        # same contract it has with KWin on a normal desktop. Just wait for the
-        # Xwayland socket so X11 apps get a usable DISPLAY, and record what
-        # KScreen reports for diagnostics.
-        local xs="" _
-        for _ in $(seq 1 50); do
+        # same contract it has with KWin on a normal desktop. Just bring Xwayland
+        # up as a usable DISPLAY for X11 apps and record what KScreen reports.
+        #
+        # Readiness is probed by speaking X protocol, not by looking for the
+        # socket file: KWin binds /tmp/.X11-unix/X0 itself and only then execs
+        # Xwayland, so the file appears early and stays behind if Xwayland dies.
+        local xs="" _ x_ready=false
+        for _ in $(seq 1 150); do
             xs="$(ls -t /tmp/.X11-unix/X* 2>/dev/null | head -n1 || true)"
-            [ -n "${xs}" ] && break
+            if [ -n "${xs}" ] && command -v xhost >/dev/null 2>&1 \
+                    && DISPLAY=":${xs##*X}" timeout 5 xhost >/dev/null 2>&1; then
+                x_ready=true
+                break
+            fi
             sleep 0.1
         done
-        local xwl_alive=false
-        if command -v pgrep >/dev/null 2>&1 && pgrep -x Xwayland >/dev/null 2>&1; then
-            xwl_alive=true
-        fi
-        if [ -n "${xs}" ] && [ "${xwl_alive}" = true ]; then
+        if [ "${x_ready}" = true ]; then
             export DISPLAY=":${xs##*X}"
-            log "KWin Xwayland up (DISPLAY=${DISPLAY})"
-            # KWin starts Xwayland with its own -auth cookie (root-owned, 0600) and
-            # never exports XAUTHORITY, so an X client run as the unprivileged
-            # steam user cannot authenticate and dies with "unable to open a
-            # connection to X". Publish a readable copy for the session.
+            log "KWin Xwayland answering on DISPLAY=${DISPLAY}"
+            # KWin starts Xwayland with its own -auth cookie and blanks
+            # XAUTHORITY for it. Publish a readable copy anyway: an X client that
+            # does have a cookie path is one failure mode less.
             local p auth=""
             for p in /proc/[0-9]*; do
                 [ "$(cat "${p}/comm" 2>/dev/null)" = "Xwayland" ] || continue
@@ -558,31 +560,33 @@ start_compositor() {
                 chmod 644 /tmp/.hermes-xauthority 2>/dev/null || true
                 export XAUTHORITY=/tmp/.hermes-xauthority
                 log "Xwayland auth published to ${XAUTHORITY} for the steam user"
-            elif [ -z "${XAUTHORITY:-}" ]; then
-                warn "Xwayland runs without an -auth file; X11 apps may fail with 'unable to open a connection to X'"
             fi
-            # The X server trusts local connections that run as its own uid
-            # (root here), which is why root connects with any cookie while the
-            # steam user is refused "Invalid MIT-MAGIC-COOKIE-1 key" even when
-            # it presents the byte-identical file: the server's auth data is not
-            # the file we can write. Grant the user explicitly instead. Root can
-            # run xhost because it is the trusted local uid.
-            if command -v xhost >/dev/null 2>&1; then
+            # Xwayland's access control list holds exactly one entry,
+            # "SI:localuser:root" - the uid it runs as. That is why root can
+            # connect with no cookie at all while the steam user is turned away
+            # with "Invalid MIT-MAGIC-COOKIE-1 key" even when it reads the very
+            # same cookie file: the server never looks at our file. Grant the
+            # user explicitly; root may do this because it is the trusted uid.
+            local granted=false
+            for _ in $(seq 1 60); do
                 if DISPLAY="${DISPLAY}" xhost +SI:localuser:steam >/dev/null 2>&1; then
-                    log "X: granted the steam user access to ${DISPLAY} (xhost SI:localuser)"
-                elif DISPLAY="${DISPLAY}" xhost +local: >/dev/null 2>&1; then
-                    log "X: granted all local users access to ${DISPLAY} (xhost +local:)"
-                else
-                    warn "X: could not grant the steam user access to ${DISPLAY}; Steam may fail with 'unable to open a connection to X'"
+                    granted=true
+                    break
                 fi
+                sleep 0.25
+            done
+            if [ "${granted}" = true ]; then
+                log "X: granted the steam user access to ${DISPLAY} (xhost SI:localuser)"
+            elif DISPLAY="${DISPLAY}" xhost +local: >/dev/null 2>&1; then
+                log "X: granted all local users access to ${DISPLAY} (xhost +local:)"
             else
-                warn "xhost missing (rebuild the image): the steam user may not be able to reach ${DISPLAY}"
+                warn "X: could not grant the steam user access to ${DISPLAY}; Steam may fail with 'unable to open a connection to X'"
             fi
         else
             # KWin binds the X11 listen sockets before it execs Xwayland, so a
             # socket file alone is not proof of a working X server: a crashed
             # Xwayland leaves the sockets behind and DISPLAY points at nothing.
-            warn "KWin is running but Xwayland is not (socket=${xs:-none}, alive=${xwl_alive})"
+            warn "KWin is running but Xwayland never answered (socket=${xs:-none})"
             warn "X11 clients (Steam) will fail with 'unable to open a connection to X'"
         fi
         if command -v kscreen-doctor >/dev/null 2>&1; then
