@@ -74,19 +74,20 @@ elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     warn "dbus-run-session missing: Steam's SteamRT3 launcher will fail without a session bus"
 fi
 
+# Big Picture minimizes itself as soon as it loses focus — i.e. the moment a game
+# window takes over. Inside this nested gamescope that looks exactly like "the
+# game crashed and the stream fell back to the desktop": the game keeps running
+# and rendering (its Gamescope WSI surface stays alive), but the focused window is
+# gone, so gamescope paints its root window instead. SDL hint; see "Big Picture
+# Mode minimizes itself after losing focus" in the ArchWiki Steam/Troubleshooting
+# page. Comments must stay OUTSIDE the list below — a '#' anywhere inside a
+# backslash-continued command swallows the rest of it.
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     XDG_CURRENT_DESKTOP=gamescope \
-    # Big Picture minimizes itself as soon as it loses focus — i.e. the moment a
-    # game window takes over. Inside this nested gamescope that looks exactly
-    # like "the game crashed and the stream fell back to the desktop": the game
-    # keeps running and rendering (its Gamescope WSI surface stays alive), but
-    # the focused window is gone, so gamescope paints its root window instead.
-    # SDL hint; see "Big Picture Mode minimizes itself after losing focus" in
-    # the ArchWiki Steam/Troubleshooting page.
     SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
