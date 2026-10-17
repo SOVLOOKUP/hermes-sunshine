@@ -96,11 +96,11 @@ cannot be loaded from a container):
 sudo ./host-module/build-hermes-kms.sh            # installs v0.3.2 (UAPI 9)
 sudo ./host-module/build-hermes-kms.sh verify    # re-check the running module any time
 
-# Manual equivalent — IMPORTANT: pin the tag. The repo's default branch is the
-# 0.4.x development line (UAPI v13); this image's Hermes 0.5.x speaks UAPI v9
-# (Hermes-KMS 0.3.x). A mismatching module loads fine but every capture ioctl
-# fails, and sessions die with "Failed to initialize video capture/encoding" /
-# "no active scanout geometry yet" in the container log.
+# Manual equivalent — IMPORTANT: pin the tag. Each Hermes release speaks one
+# Hermes-KMS UAPI line: 0.5.x wants UAPI 9 (Hermes-KMS 0.3.x), 0.6.x wants UAPI
+# 13/14 (Hermes-KMS 0.4.0). A mismatching module loads fine but capture ioctls
+# fail or degrade, and sessions die with "Failed to initialize video capture/
+# encoding" / "no active scanout geometry yet" in the container log.
 git clone --branch v0.3.2 --depth 1 https://github.com/MrOz59/Hermes-KMS
 cd Hermes-KMS
 sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/hermes_kms.ko
@@ -111,14 +111,39 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 ```
 
 > **Upgrading the host module?** Each Hermes release expects a specific
-> Hermes-KMS UAPI line (Hermes 0.5.x ↔ UAPI 7/8/9, i.e. Hermes-KMS 0.3.x; the
-> unreleased Hermes 0.6/main ↔ UAPI 10+). The script above derives the expected
+> Hermes-KMS UAPI line (Hermes 0.5.x ↔ UAPI 7/8/9, i.e. Hermes-KMS 0.3.x;
+> Hermes 0.6.x ↔ UAPI 13/14, i.e. Hermes-KMS 0.4.0). The script above derives the expected
 > UAPI from the tag and refuses to pass verification on a mismatch, so the same
 > command keeps working for future releases — but the container image must be
 > updated to the matching Hermes release in the same step. Never install from
 > the default branch; always check out the release tag matching your container
 > image, and reload the module (`modprobe -r hermes_kms && modprobe hermes_kms
 > initial_enabled=0`) before restarting the container.
+
+### HDR (module 0.4.0 / Hermes 0.6.0)
+
+Hermes-KMS 0.4.0 speaks UAPI 14 and is the first line that can carry HDR: with
+`hdr_enable=1` (default off, load-time only) the synthetic EDID grows a CTA-861
+extension with HDR Static Metadata + BT2020 Colorimetry blocks and the connector
+exposes `HDR_OUTPUT_METADATA` and `Colorspace`; `ACQUIRE_FRAME2` then returns
+each frame together with its EOTF, static metadata and full-range flag, which is
+what lets Hermes 0.6.0 put 10-bit PQ/BT.2020 HEVC Main10 or AV1 into the stream.
+`color_depth=10` is the scanout half of the same switch — the module flags that
+pairing as untested, so validate it before deploying.
+
+Two things still gate it:
+
+- the compositor has to drive the output in HDR (upstream validates on KDE/KWin;
+  a compositor without an HDR output path keeps the stream SDR regardless of how
+  the module is loaded), and
+- the module and the container must be the matching pair (0.4.0 ↔ Hermes 0.6.0,
+  UAPI 14) — a 0.3.x module has no `hdr_enable` at all and UAPI 9 without the
+  colour metadata.
+
+The sway session this image runs has no HDR output path, and a nested gamescope
+cannot provide one (sway is the one scanning out to `Virtual-1`), so HDR is not
+reachable on this image as configured — it is a KDE-class-compositor feature
+today.
 
 To make the module load **automatically on system boot**:
 

@@ -92,11 +92,12 @@ case "$TAG" in
 esac
 
 # Expected UAPI per Hermes-KMS line: 0.3.x speaks UAPI 9 (Hermes 0.5.x),
-# 0.4.x speaks UAPI 13 (needs a container with Hermes 0.6.0+ — update BOTH).
+# 0.4.x speaks UAPI 14 (Hermes 0.6.0, which is the companion release for it and
+# adds per-frame colour metadata — the HDR path; update BOTH in the same step).
 if [ -z "$EXPECTED_UAPI" ]; then
     case "$VER" in
         0.3.*) EXPECTED_UAPI=9 ;;
-        0.4.*) EXPECTED_UAPI=13 ;;
+        0.4.*) EXPECTED_UAPI=14 ;;
         *)     warn "unknown version line $VER — skipping the UAPI expectation check" ;;
     esac
 fi
