@@ -360,7 +360,7 @@ start_compositor() {
 
     # Opt-in KWin session (HDR experiment). Only meaningful on the Hermes-KMS
     # DRM path; everything here falls through to sway when it does not come up.
-    if [ "${COMPOSITOR:-sway}" = "kwin" ]; then
+    if [ "${COMPOSITOR:-kwin}" = "kwin" ]; then
         if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
             log "COMPOSITOR=kwin: starting kwin_wayland on ${HERMES_KMS_CARD}"
             setup_kms_env
@@ -370,10 +370,10 @@ start_compositor() {
                 KMS_ZEROCOPY="true"
                 export XDG_CURRENT_DESKTOP=KDE
             else
-                warn "COMPOSITOR=kwin failed; falling back to the sway session"
+                warn "KWin session failed; falling back to sway (set COMPOSITOR=sway to skip this attempt)"
             fi
         else
-            warn "COMPOSITOR=kwin needs the Hermes-KMS DRM path; falling back to sway"
+            warn "KWin needs the Hermes-KMS DRM path; falling back to sway"
         fi
     fi
 

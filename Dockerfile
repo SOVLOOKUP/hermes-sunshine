@@ -28,9 +28,10 @@ LABEL org.opencontainers.image.title="hermes-sunshine" \
 ARG HERMES_REPO=MrOz59/Hermes
 ARG HERMES_REF=latest
 ARG USE_CN_MIRROR=true
-# Optional KWin session (COMPOSITOR=kwin) for the HDR experiment. Off by
-# default: sway is the shipped compositor, KWin drags in a KDE stack.
-ARG WITH_KWIN=false
+# KWin is the default session compositor (COMPOSITOR=kwin): it is the only
+# session in this image that can drive HDR, which Hermes validates on KWin.
+# Build with WITH_KWIN=false to drop the KDE layer and fall back to sway.
+ARG WITH_KWIN=true
 
 ENV LANG=C.UTF-8 \
     XDG_RUNTIME_DIR=/tmp/runtime \
@@ -43,7 +44,7 @@ ENV LANG=C.UTF-8 \
     START_PIPEWIRE=true \
     START_AVAHI=true \
     ENABLE_XWAYLAND=true \
-    COMPOSITOR=sway
+    COMPOSITOR=kwin
 
 # Configure mirrors for runtime stage (includes cachyos-v3-mirrorlist)
 RUN set -eu; \

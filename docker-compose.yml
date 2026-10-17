@@ -85,12 +85,12 @@ services:
     # environment:
     #   TZ: Asia/Shanghai        # set your timezone (required for correct Steam time)
     #   HERMES_KMS: auto         # virtual display: auto | on | off
-    #   COMPOSITOR: sway         # session compositor: sway | kwin (kwin needs an
-    #                            # image built with WITH_KWIN=true; HDR experiment)
+    #   COMPOSITOR: kwin         # session compositor: kwin (HDR-capable default)
+    #                            # | sway (wlroots fallback)
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"
     #   DISPLAY_REFRESH: "60"
-    #   START_COMPOSITOR: "true" # Wayland (sway) session
+    #   START_COMPOSITOR: "true" # Wayland session (KWin by default)
     #   START_PIPEWIRE: "true"   # PipeWire audio (+ virtual sink)
     #   START_AVAHI: "true"
     #   ENABLE_XWAYLAND: "true"  # X11 app compatibility
