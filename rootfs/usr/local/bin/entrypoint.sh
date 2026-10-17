@@ -194,6 +194,23 @@ start_udev() {
     udevadm settle --timeout=5 >/dev/null 2>&1 || true
 }
 
+# --- Hermes-KMS module parameters (diagnostics) ------------------------------
+# The HDR path is gated by module parameters that live on the *host*; inside the
+# container they are only reachable through sysfs, and a mismatch (for example
+# hdr_enable=1 while the client asked for SDR) stays invisible until capture
+# fails with "did not commit the requested SDR scanout before capture". Log them
+# once at startup so the log alone says which mode the driver is in.
+log_kms_params() {
+    local p="/sys/module/hermes_kms/parameters" f vals=""
+    [ -d "${p}" ] || return 0
+    for f in hdr_enable color_depth; do
+        [ -r "${p}/${f}" ] && vals+="${f}=$(cat "${p}/${f}" 2>/dev/null) "
+    done
+    [ -n "${vals}" ] && log "hermes_kms parameters: ${vals}"
+    [ -r "${p}/hdr_enable" ] \
+        || warn "hermes_kms exposes no hdr_enable (module older than 0.4.0): HDR is unavailable"
+}
+
 # --- Wayland compositor (sway): KMS output with headless fallback -----------
 
 # Start sway in the background with the currently exported WLR_* environment and
@@ -885,6 +902,7 @@ start_dbus
 [ "${START_AVAHI}" = "true" ] && start_avahi || true
 if [ "${START_COMPOSITOR}" = "true" ]; then
     detect_devices
+    log_kms_params
     start_udev || warn "continuing without udev (Hermes-KMS hotplug may not be seen)"
     start_compositor || warn "continuing without a Wayland session (capture will fail)"
 fi
