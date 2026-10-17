@@ -347,7 +347,10 @@ How it works and what to know:
   not come up, the entrypoint falls back to sway and logs why. Set
   `COMPOSITOR=sway` to run the wlroots session Hermes drives over
   wlr-output-management, and build with `--build-arg WITH_KWIN=false` to drop the
-  KDE layer entirely (that image always runs sway).
+  KDE layer entirely (that image always runs sway). KWin needs
+  `cap_add: [SYS_NICE]`: its binary carries that file capability, and `execve`
+  refuses to run it when the capability is outside the container's bounding set
+  ("Operation not permitted"), which surfaces as a KWin→sway fallback.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland

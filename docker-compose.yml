@@ -27,6 +27,12 @@ services:
     ipc: host
     cap_add:
       - SYS_ADMIN
+      # KWin ships with file capabilities (cap_sys_nice, for realtime scheduling).
+      # execve() refuses to run a binary whose file capabilities are outside the
+      # container's bounding set, failing with EPERM — visible as
+      # "/usr/sbin/kwin_wayland: Operation not permitted" in the entrypoint log.
+      # It also lets gamescope/PipeWire take RT priorities.
+      - SYS_NICE
     security_opt:
       - seccomp=unconfined
       # Steam's sandbox (pressure-vessel / bubblewrap) creates a nested mount

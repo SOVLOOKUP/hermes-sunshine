@@ -239,6 +239,8 @@ launch_sway() {
 launch_kwin() {
     command -v kwin_wayland >/dev/null 2>&1 \
         || { warn "kwin_wayland not installed (rebuild with WITH_KWIN=true)"; return 1; }
+    local kwin_bin
+    kwin_bin="$(command -v kwin_wayland)"
     local sock="${KWIN_SOCKET:-wayland-kwin}"
     # A previous run (or a crash) can leave the socket file behind; a stale file
     # would both fool the wait loop and be picked up by sway's socket discovery.
@@ -285,7 +287,15 @@ launch_kwin() {
     fi
     kill "${pid}" 2>/dev/null || true
     rm -f "${XDG_RUNTIME_DIR}/${sock}"
-    warn "kwin_wayland did not publish a Wayland socket; see ${KWIN_LOG:-/var/log/kwin.log}"
+    # An execve() failure here is almost always a capability mismatch: a binary
+    # carrying file capabilities (KWin ships cap_sys_nice for realtime
+    # scheduling) cannot run when that capability is outside the container's
+    # bounding set, and execve fails with EPERM ("Operation not permitted").
+    warn "kwin_wayland (${kwin_bin}) did not publish a Wayland socket; see ${KWIN_LOG:-/var/log/kwin.log}"
+    if command -v getcap >/dev/null 2>&1; then
+        { getcap "${kwin_bin}" || true; ls -l "${kwin_bin}" || true; } >&2
+        warn "if file capabilities are listed above, add 'cap_add: [SYS_NICE]' to the container"
+    fi
     tail -n 25 "${KWIN_LOG:-/var/log/kwin.log}" >&2 || true
     return 1
 }
