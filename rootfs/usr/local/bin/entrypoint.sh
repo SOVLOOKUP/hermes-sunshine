@@ -274,7 +274,15 @@ setup_kms_env() {
     export WLR_BACKENDS=drm,headless,libinput
     export WLR_HEADLESS_OUTPUTS=1
     export WLR_DRM_DEVICES="${HERMES_KMS_CARD}"
-    export WLR_RENDERER="${WLR_RENDERER:-gles2}"
+    # sway enables HDR only when the renderer supports output colour transforms.
+    # gles2 does not ("Cannot enable HDR on output Virtual-1: renderer doesn't
+    # support output color transforms"); the Vulkan renderer does, so prefer it
+    # whenever the module is in HDR mode. An explicit WLR_RENDERER still wins.
+    local default_renderer="gles2"
+    if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+        default_renderer="vulkan"
+    fi
+    export WLR_RENDERER="${WLR_RENDERER:-${default_renderer}}"
     [ -n "${RENDER_NODE}" ] && \
         export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-${RENDER_NODE}}"
     export WLR_LIBINPUT_NO_DEVICES=1
@@ -297,21 +305,31 @@ setup_headless_env() {
     fi
 }
 
+# Render the sway config from the template. HDR is only meaningful when the
+# module advertises it AND the renderer can do output colour transforms, so the
+# directive is injected conditionally rather than always present.
+write_sway_config() {
+    local hdr_on="$1" xw="xwayland disable" hdr=""
+    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
+    if [ "${hdr_on}" = "true" ]; then
+        hdr='output "Virtual-1" hdr on'
+    fi
+    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
+}
+
 start_compositor() {
     # Build the effective sway config from the template (resolution is applied
     # afterwards via swaymsg, since the output name depends on the backend).
-    local xw="xwayland disable"
-    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
     # HDR only exists end to end when the module advertises it: the connector
     # colour properties and 10-bit scanout come from hdr_enable=1 color_depth=10,
-    # and sway >= 1.12 is what sets BT2020/PQ on top of it. Keep the directive out
-    # of the config otherwise, so an SDR module is never asked for HDR.
-    local hdr=""
+    # and sway >= 1.12 sets BT2020/PQ on top of that. Keep the directive out of
+    # the config otherwise, so an SDR module is never asked for HDR.
+    local hdr_on="false"
     if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
-        hdr='output "Virtual-1" hdr on'
+        hdr_on="true"
         log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
     fi
-    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
+    write_sway_config "${hdr_on}"
 
     # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless backend.
     local use_kms="false"
@@ -341,7 +359,22 @@ start_compositor() {
             started="true"
             KMS_ZEROCOPY="true"
             log "Wayland session up on the Hermes-KMS output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"
-        else
+        elif [ "${WLR_RENDERER}" = "vulkan" ]; then
+            # The Vulkan renderer is newer than gles2 and can fail to initialise
+            # on some setups (missing Vulkan device, driver quirks). Falling back
+            # keeps streaming usable; only HDR is lost.
+            warn "sway did not start with the Vulkan renderer (needed for HDR); retrying with gles2"
+            export WLR_RENDERER=gles2
+            # Drop the HDR directive too: gles2 would only log "renderer doesn't
+            # support output color transforms" on every connect.
+            write_sway_config "false"
+            if launch_sway; then
+                started="true"
+                KMS_ZEROCOPY="true"
+                log "Wayland session up on the Hermes-KMS output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY}, HDR off)"
+            fi
+        fi
+        if [ "${started}" != "true" ]; then
             warn "sway could not start on the Hermes-KMS DRM output; see /var/log/sway.log"
             tail -n 20 /var/log/sway.log >&2 || true
             warn "the container has no active DRM session (a seat cannot be activated"
@@ -355,6 +388,9 @@ start_compositor() {
             warn "For the low-latency KMS path, load hermes_kms.ko on the host and pass /dev/dri."
         fi
         setup_headless_env
+        # The headless backend is software/pixman territory; HDR cannot work
+        # there, so do not leave the directive in the config.
+        write_sway_config "false"
         if launch_sway; then
             started="true"
             log "Wayland session up on a headless output (WAYLAND_DISPLAY=${WAYLAND_DISPLAY})"

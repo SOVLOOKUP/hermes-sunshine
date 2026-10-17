@@ -155,6 +155,13 @@ asked for HDR it cannot scan out. Rendering stays on the real GPU — HDR costs
 nothing in the capture path. Hermes then logs `Display is HDR: true`, `Color
 depth: 10-bit` and `Virtual-1 scanout confirmed HDR`.
 
+HDR also constrains the renderer: sway refuses to enable it on the gles2
+renderer ("Cannot enable HDR on output Virtual-1: renderer doesn't support output
+color transforms"), so the entrypoint selects `WLR_RENDERER=vulkan` automatically
+when the module is in HDR mode (an explicit `WLR_RENDERER` still wins). If Vulkan
+cannot initialise, it retries once with gles2 and drops the HDR directive — the
+stream keeps working, only HDR is lost.
+
 To make the module load **automatically on system boot**:
 
 ```bash
