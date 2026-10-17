@@ -335,16 +335,16 @@ launch_kwin() {
     chmod 644 "${xauth_file}"
     export XAUTHORITY="${xauth_file}"
 
-    # KWin only hands Xwayland an -auth cookie when it is told which file to use.
-    # Without this, Xwayland inherits XAUTHORITY="" and falls back to
-    # /root/.Xauthority, so the steam user cannot authenticate. Probe the option
-    # first: passing an unknown flag would abort KWin and lose the session.
-    local xauth_arg=""
-    if timeout 10 "${kwin_bin}" --help 2>&1 | grep -q -- '--xwayland-xauthority'; then
-        xauth_arg="--xwayland-xauthority ${xauth_file}"
-    else
-        warn "${kwin_bin} does not support --xwayland-xauthority; Xwayland and the steam user will not share an X cookie"
-    fi
+    # KWin starts Xwayland without -auth and blanks XAUTHORITY for it, so the
+    # server falls back to $HOME/.Xauthority (HOME is /root here). Keeping a copy
+    # of the same cookie there gives the server auth data the steam user can
+    # satisfy, without touching KWin's command line: passing
+    # --xwayland-xauthority did make KWin hand Xwayland "-auth <file>", but
+    # Xwayland then exited immediately (KWin logged nothing), which lost X
+    # entirely. Diagnostic tools (xorg-xauth/xorg-xdpyinfo) are in the image, so
+    # "xdpyinfo -display :0" as steam tells us definitively whether auth works.
+    install -m 600 "${xauth_file}" /root/.Xauthority 2>/dev/null \
+        || cp -f "${xauth_file}" /root/.Xauthority 2>/dev/null || true
 
     # A restarted container keeps /tmp, so sockets from the previous Xwayland
     # survive it. They are dead (the server is gone) but still sort first, which
@@ -359,8 +359,7 @@ launch_kwin() {
     QT_FORCE_STDERR_LOGGING=1 \
     QT_LOGGING_RULES="${KWIN_LOGGING_RULES:-kwin_*.debug=true}" \
     env -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER -u LIBGL_ALWAYS_SOFTWARE \
-    # shellcheck disable=SC2086  # xauth_arg is a pre-split "--opt path" pair
-    kwin_wayland --drm --socket "${sock}" --xwayland ${xauth_arg} \
+    kwin_wayland --drm --socket "${sock}" --xwayland \
         --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
     local pid=$! sockfile="" _
     for _ in $(seq 1 160); do
@@ -536,7 +535,11 @@ start_compositor() {
             [ -n "${xs}" ] && break
             sleep 0.1
         done
-        if [ -n "${xs}" ]; then
+        local xwl_alive=false
+        if command -v pgrep >/dev/null 2>&1 && pgrep -x Xwayland >/dev/null 2>&1; then
+            xwl_alive=true
+        fi
+        if [ -n "${xs}" ] && [ "${xwl_alive}" = true ]; then
             export DISPLAY=":${xs##*X}"
             log "KWin Xwayland up (DISPLAY=${DISPLAY})"
             # KWin starts Xwayland with its own -auth cookie (root-owned, 0600) and
@@ -559,7 +562,11 @@ start_compositor() {
                 warn "Xwayland runs without an -auth file; X11 apps may fail with 'unable to open a connection to X'"
             fi
         else
-            warn "KWin started but no Xwayland socket appeared (ENABLE_XWAYLAND=${ENABLE_XWAYLAND})"
+            # KWin binds the X11 listen sockets before it execs Xwayland, so a
+            # socket file alone is not proof of a working X server: a crashed
+            # Xwayland leaves the sockets behind and DISPLAY points at nothing.
+            warn "KWin is running but Xwayland is not (socket=${xs:-none}, alive=${xwl_alive})"
+            warn "X11 clients (Steam) will fail with 'unable to open a connection to X'"
         fi
         if command -v kscreen-doctor >/dev/null 2>&1; then
             if kscreen-doctor -o > /var/log/kscreen-doctor.log 2>&1; then
