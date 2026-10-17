@@ -352,7 +352,13 @@ launch_kwin() {
     rm -f /tmp/.X11-unix/X* 2>/dev/null || true
 
     KWIN_DRM_NO_AMS="${KWIN_DRM_NO_AMS:-1}" \
-    KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
+    # The virtual card has no render engine, so KWin composites it with
+    # llvmpipe unless it is also given the real GPU. KWin builds a render
+    # device list from the DRM devices it is handed and copies buffers with
+    # MultiGpuSwapchain; passing the amdgpu card as a second device lets it
+    # render on hardware and scan out through Hermes-KMS. It cannot take DRM
+    # master there (the host owns that card), so this is opt-in via env.
+    KWIN_DRM_DEVICES="${KWIN_DRM_DEVICES:-${HERMES_KMS_CARD}}" \
     XDG_SESSION_TYPE=wayland \
     XDG_CURRENT_DESKTOP=KDE \
     XDG_SESSION_DESKTOP=KDE \
