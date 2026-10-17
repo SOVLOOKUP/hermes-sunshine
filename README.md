@@ -350,7 +350,15 @@ How it works and what to know:
   KDE layer entirely (that image always runs sway). KWin needs
   `cap_add: [SYS_NICE]`: its binary carries that file capability, and `execve`
   refuses to run it when the capability is outside the container's bounding set
-  ("Operation not permitted"), which surfaces as a KWin→sway fallback.
+  ("Operation not permitted"), which surfaces as a KWin→sway fallback. Two more
+  KWin-specific quirks are handled automatically: the session runs with
+  `KWIN_DRM_NO_AMS=1` (KWin's atomic commit state machine sends a TEST_ONLY
+  commit with mode properties but without `ALLOW_MODESET`, which this driver's
+  kernel rejects with `Modeset failed: Invalid argument` in a loop — the legacy
+  `drmModeSetCrtc` path works), and the Xwayland auth cookie is copied to
+  `/tmp/.hermes-xauthority` and exported as `XAUTHORITY`, because KWin's Xwayland
+  keeps it root-only and the `steam` user would otherwise die with "unable to
+  open a connection to X".
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland

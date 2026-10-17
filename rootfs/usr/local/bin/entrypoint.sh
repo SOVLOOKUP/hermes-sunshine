@@ -302,6 +302,14 @@ launch_kwin() {
     # stderr: without these two variables /var/log/kwin.log only holds Mesa's
     # driver chatter (three "ZINK: failed to choose pdev" lines and nothing else),
     # which says nothing about why an output was never scanned out.
+    # KWin's atomic commit state machine issues a TEST_ONLY commit that carries
+    # mode properties without DRM_MODE_ATOMIC_ALLOW_MODESET when it believes no
+    # modeset is pending. The kernel rejects that with -EINVAL ("requires full
+    # modeset") and KWin retries forever: "Modeset failed: Invalid argument",
+    # no frame is ever scanned out. The legacy (drmModeSetCrtc) path has no such
+    # state machine and sets the mode correctly on the Hermes-KMS card, so use it
+    # for KWin by default; set KWIN_DRM_NO_AMS=0 to force atomic back on.
+    KWIN_DRM_NO_AMS="${KWIN_DRM_NO_AMS:-1}" \
     KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
     XDG_SESSION_TYPE=wayland \
     XDG_CURRENT_DESKTOP=KDE \
@@ -487,6 +495,25 @@ start_compositor() {
         if [ -n "${xs}" ]; then
             export DISPLAY=":${xs##*X}"
             log "KWin Xwayland up (DISPLAY=${DISPLAY})"
+            # KWin starts Xwayland with its own -auth cookie (root-owned, 0600) and
+            # never exports XAUTHORITY, so an X client run as the unprivileged
+            # steam user cannot authenticate and dies with "unable to open a
+            # connection to X". Publish a readable copy for the session.
+            local p auth=""
+            for p in /proc/[0-9]*; do
+                [ "$(cat "${p}/comm" 2>/dev/null)" = "Xwayland" ] || continue
+                auth="$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null \
+                    | sed -n 's/.* -auth \([^ ]*\).*/\1/p')"
+                [ -n "${auth}" ] && break
+            done
+            if [ -n "${auth}" ] && [ -r "${auth}" ]; then
+                cp -f "${auth}" /tmp/.hermes-xauthority 2>/dev/null || true
+                chmod 644 /tmp/.hermes-xauthority 2>/dev/null || true
+                export XAUTHORITY=/tmp/.hermes-xauthority
+                log "Xwayland auth published to ${XAUTHORITY} for the steam user"
+            elif [ -z "${XAUTHORITY:-}" ]; then
+                warn "Xwayland runs without an -auth file; X11 apps may fail with 'unable to open a connection to X'"
+            fi
         else
             warn "KWin started but no Xwayland socket appeared (ENABLE_XWAYLAND=${ENABLE_XWAYLAND})"
         fi

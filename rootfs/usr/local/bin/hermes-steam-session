@@ -133,12 +133,20 @@ fi
 # Mode minimizes itself after losing focus" in the ArchWiki Steam/Troubleshooting
 # page. Comments must stay OUTSIDE the list below — a '#' anywhere inside a
 # backslash-continued command swallows the rest of it.
+# X11 auth: KWin starts Xwayland with its own cookie, which the unprivileged
+# steam user cannot read; the entrypoint publishes a readable copy and
+# exports XAUTHORITY. sway runs Xwayland without access control, so this is
+# simply empty there.
+XAUTH_ENV=()
+[ -n "${XAUTHORITY:-}" ] && XAUTH_ENV=(XAUTHORITY="${XAUTHORITY}")
+
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     "${XENV[@]}" \
+    "${XAUTH_ENV[@]}" \
     SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
