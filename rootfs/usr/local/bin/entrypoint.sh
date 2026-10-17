@@ -1002,9 +1002,13 @@ if [ -d /dev/dri ]; then
     # vainfo often reports nothing useful as root even when encoding works
     # (Hermes probes h264/hevc/av1_vaapi itself when a stream starts), so this is
     # a note, not a warning: crying wolf here sent us chasing a non-issue.
-    va_info="$(vainfo 2>&1 | head -n 4)"
+    # "|| true" is load-bearing: the entrypoint runs under `set -euo pipefail`,
+    # vainfo exits non-zero on many headless setups, and head closing the pipe
+    # can turn that into SIGPIPE — either one used to kill the entrypoint right
+    # after "GPU nodes:", which looked like a spontaneous container restart.
+    va_info="$(vainfo 2>&1 | head -n 4 || true)"
     if printf '%s' "${va_info}" | grep -q 'VAProfile'; then
-        log "VAAPI: $(printf '%s' "${va_info}" | grep -E 'Driver version|VAProfile' | head -n 3 | tr '\n' ' ')"
+        log "VAAPI: $(printf '%s' "${va_info}" | grep -E 'Driver version|VAProfile' | head -n 3 | tr '\n' ' ' || true)"
     else
         log "note: vainfo reported no profiles (${va_info%%$'\n'*}); Hermes probes encoders itself at stream time"
     fi
