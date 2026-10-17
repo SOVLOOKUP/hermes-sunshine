@@ -68,15 +68,22 @@ TZ_ENV=()
 # with the socket in its runtime dir — the same XDG_RUNTIME_DIR the SteamRT3
 # sandbox shares, so both the launcher service (outside) and the client (inside)
 # can reach it. dbus-run-session tears the bus down with the session.
+# Always start our own bus, even when DBUS_SESSION_BUS_ADDRESS is already set.
+# That inherited address is not ours to use: with COMPOSITOR=kwin the entrypoint
+# starts a root-owned bus for KWin/KScreen and exports it, and the steam user
+# cannot connect to that socket. When KWin then falls back to sway the dead-for-us
+# address is still exported, and trusting it made Steam exit 125 in a loop.
+# dbus-run-session overrides the variable for its children, so the SteamRT3
+# launcher service always gets a bus it can actually reach.
 DBUS_WRAP=()
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+if command -v dbus-run-session >/dev/null 2>&1; then
     # A hard-killed previous session can leave the socket behind, and dbus-daemon
     # then refuses to bind it; nothing else can own it here (single session host).
     if [ -S "${runtime}/bus" ]; then
         rm -f "${runtime}/bus"
     fi
     DBUS_WRAP=(dbus-run-session --)
-elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+else
     warn "dbus-run-session missing: Steam's SteamRT3 launcher will fail without a session bus"
 fi
 

@@ -207,7 +207,7 @@ launch_sway() {
     local pid=$! sock="" _
     for _ in $(seq 1 60); do
         kill -0 "${pid}" 2>/dev/null || break
-        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' 2>/dev/null | head -n1 || true)"
+        sock="$(find "${XDG_RUNTIME_DIR}" -maxdepth 1 -name 'wayland-*' ! -name '*.lock' ! -name 'wayland-kwin' 2>/dev/null | head -n1 || true)"
         [ -n "${sock}" ] && break
         sleep 0.25
     done
@@ -240,6 +240,9 @@ launch_kwin() {
     command -v kwin_wayland >/dev/null 2>&1 \
         || { warn "kwin_wayland not installed (rebuild with WITH_KWIN=true)"; return 1; }
     local sock="${KWIN_SOCKET:-wayland-kwin}"
+    # A previous run (or a crash) can leave the socket file behind; a stale file
+    # would both fool the wait loop and be picked up by sway's socket discovery.
+    rm -f "${XDG_RUNTIME_DIR}/${sock}"
 
     # KWin publishes outputs over D-Bus (org.kde.KScreen / org.kde.KWin). Hermes
     # runs as root, outside KWin's process tree, so both need one shared session
@@ -281,6 +284,7 @@ launch_kwin() {
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
+    rm -f "${XDG_RUNTIME_DIR}/${sock}"
     warn "kwin_wayland did not publish a Wayland socket; see ${KWIN_LOG:-/var/log/kwin.log}"
     tail -n 25 "${KWIN_LOG:-/var/log/kwin.log}" >&2 || true
     return 1
