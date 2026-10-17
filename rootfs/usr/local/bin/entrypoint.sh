@@ -229,6 +229,63 @@ launch_sway() {
     return 1
 }
 
+# Start kwin_wayland as the session compositor instead of sway (COMPOSITOR=kwin).
+# KWin is the compositor Hermes' HDR path is validated against: it drives the
+# virtual output through KScreen, so a Hermes-KMS 0.4.0 loaded with hdr_enable=1
+# color_depth=10 can hand PQ/BT.2020 frames to Hermes 0.6.0. sway has no HDR
+# output path, which is why this exists. Opt-in and experimental: HDR is not
+# validated end to end inside a container yet, so any failure here falls back to
+# sway rather than leaving the container without a compositor.
+launch_kwin() {
+    command -v kwin_wayland >/dev/null 2>&1 \
+        || { warn "kwin_wayland not installed (rebuild with WITH_KWIN=true)"; return 1; }
+    local sock="${KWIN_SOCKET:-wayland-kwin}"
+
+    # KWin publishes outputs over D-Bus (org.kde.KScreen / org.kde.KWin). Hermes
+    # runs as root, outside KWin's process tree, so both need one shared session
+    # bus instead of each autolaunching a private one.
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+        rm -f "${XDG_RUNTIME_DIR}/bus"
+        dbus-daemon --session --fork --nopidfile \
+            --address="unix:path=${XDG_RUNTIME_DIR}/bus" >/dev/null 2>&1 || true
+        if [ -S "${XDG_RUNTIME_DIR}/bus" ]; then
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+            log "session D-Bus for KWin at ${DBUS_SESSION_BUS_ADDRESS}"
+        else
+            warn "no session D-Bus; KScreen cannot publish the virtual output to Hermes"
+        fi
+    fi
+
+    # --drm selects the real KMS backend (not --virtual, whose output goes to a
+    # fake framebuffer nothing captures). KWIN_DRM_DEVICES pins it to the
+    # Hermes-KMS card, which is not the render GPU; without it KWin picks the
+    # first DRM device it finds and scans out to the wrong card.
+    # Scoped to KWin's own environment: if it fails and we fall back to sway, the
+    # session must not inherit a KDE desktop identity.
+    KWIN_DRM_DEVICES="${HERMES_KMS_CARD}" \
+    XDG_SESSION_TYPE=wayland \
+    XDG_CURRENT_DESKTOP=KDE \
+    XDG_SESSION_DESKTOP=KDE \
+    kwin_wayland --drm --socket "${sock}" --xwayland \
+        --no-lockscreen --no-global-shortcuts > "${KWIN_LOG:-/var/log/kwin.log}" 2>&1 &
+    local pid=$! sockfile="" _
+    for _ in $(seq 1 160); do
+        kill -0 "${pid}" 2>/dev/null || break
+        [ -S "${XDG_RUNTIME_DIR}/${sock}" ] && { sockfile="${XDG_RUNTIME_DIR}/${sock}"; break; }
+        sleep 0.25
+    done
+    if [ -n "${sockfile}" ] && kill -0 "${pid}" 2>/dev/null; then
+        PIDS+=("${pid}")
+        export WAYLAND_DISPLAY="${sock}"
+        log "kwin_wayland up on ${HERMES_KMS_CARD} (WAYLAND_DISPLAY=${sock})"
+        return 0
+    fi
+    kill "${pid}" 2>/dev/null || true
+    warn "kwin_wayland did not publish a Wayland socket; see ${KWIN_LOG:-/var/log/kwin.log}"
+    tail -n 25 "${KWIN_LOG:-/var/log/kwin.log}" >&2 || true
+    return 1
+}
+
 # Environment for the DRM (KMS) backend: drive the Hermes-KMS card, render on the
 # real GPU, and open the device through a seatd session.
 #
@@ -300,7 +357,27 @@ start_compositor() {
 
     local started="false"
     local compositor_kind=""
-    if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
+
+    # Opt-in KWin session (HDR experiment). Only meaningful on the Hermes-KMS
+    # DRM path; everything here falls through to sway when it does not come up.
+    if [ "${COMPOSITOR:-sway}" = "kwin" ]; then
+        if [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
+            log "COMPOSITOR=kwin: starting kwin_wayland on ${HERMES_KMS_CARD}"
+            setup_kms_env
+            if launch_kwin; then
+                started="true"
+                compositor_kind="kwin"
+                KMS_ZEROCOPY="true"
+                export XDG_CURRENT_DESKTOP=KDE
+            else
+                warn "COMPOSITOR=kwin failed; falling back to the sway session"
+            fi
+        else
+            warn "COMPOSITOR=kwin needs the Hermes-KMS DRM path; falling back to sway"
+        fi
+    fi
+
+    if [ "${started}" != "true" ] && [ "${use_kms}" = "true" ] && [ -n "${HERMES_KMS_CARD}" ]; then
         log "starting sway on the Hermes-KMS DRM output (${HERMES_KMS_CARD})"
         setup_kms_env
         if launch_sway; then
@@ -335,7 +412,34 @@ start_compositor() {
         return 1
     fi
 
-    if [ "${compositor_kind}" = "kms" ]; then
+    if [ "${compositor_kind}" = "kwin" ]; then
+        # KWin owns Virtual-1 through KScreen. Nothing to force here: Hermes
+        # enables the connector per stream and sets the mode through KScreen, the
+        # same contract it has with KWin on a normal desktop. Just wait for the
+        # Xwayland socket so X11 apps get a usable DISPLAY, and record what
+        # KScreen reports for diagnostics.
+        local xs="" _
+        for _ in $(seq 1 50); do
+            xs="$(ls /tmp/.X11-unix/X* 2>/dev/null | head -n1 || true)"
+            [ -n "${xs}" ] && break
+            sleep 0.1
+        done
+        if [ -n "${xs}" ]; then
+            export DISPLAY=":${xs##*X}"
+            log "KWin Xwayland up (DISPLAY=${DISPLAY})"
+        else
+            warn "KWin started but no Xwayland socket appeared (ENABLE_XWAYLAND=${ENABLE_XWAYLAND})"
+        fi
+        if command -v kscreen-doctor >/dev/null 2>&1; then
+            if kscreen-doctor -o > /var/log/kscreen-doctor.log 2>&1; then
+                log "kscreen output state written to /var/log/kscreen-doctor.log"
+            else
+                warn "kscreen-doctor failed; Hermes may not be able to set the virtual output (see /var/log/kscreen-doctor.log)"
+            fi
+        else
+            warn "kscreen-doctor missing (rebuild with WITH_KWIN=true); Hermes cannot set the virtual output mode"
+        fi
+    elif [ "${compositor_kind}" = "kms" ]; then
         # sway is on a drm,headless multi-backend: the DRM backend adopts the
         # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
         # by headless_mode in sunshine.conf) and Hermes reads that connector
@@ -587,10 +691,12 @@ prepare_steam() {
     # when the window maps, after Hermes has hotplugged the connector) and focus
     # it so input lands there too. On the headless fallback there is only one
     # output, so no move is needed.
-    if [ "${KMS_ZEROCOPY}" = "true" ]; then
-        swaymsg 'for_window [app_id="gamescope"] move container to output Virtual-1, fullscreen enable, focus, border none' >/dev/null 2>&1 || true
-    else
-        swaymsg 'for_window [app_id="gamescope"] fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+    if command -v swaymsg >/dev/null 2>&1 && [ -n "${SWAYSOCK:-}" ]; then
+        if [ "${KMS_ZEROCOPY}" = "true" ]; then
+            swaymsg 'for_window [app_id="gamescope"] move container to output Virtual-1, fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+        else
+            swaymsg 'for_window [app_id="gamescope"] fullscreen enable, focus, border none' >/dev/null 2>&1 || true
+        fi
     fi
 
     log "Steam Big Picture ready as a per-session app (launches at the client's resolution when streamed)"

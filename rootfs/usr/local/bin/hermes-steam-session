@@ -114,8 +114,8 @@ if [ "${STEAM_GAMESCOPE}" = "true" ]; then
 else
     xdisp="$(sway_x_display 2>/dev/null || true)"
     [ -n "${xdisp}" ] || xdisp="${DISPLAY:-:0}"
-    XENV=(DISPLAY="${xdisp}" XDG_CURRENT_DESKTOP=sway)
-    log "compositor: sway (Steam on the session directly, DISPLAY=${xdisp})"
+    XENV=(DISPLAY="${xdisp}" XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-sway}")
+    log "compositor: ${XDG_CURRENT_DESKTOP:-sway} (Steam on the session directly, DISPLAY=${xdisp})"
 fi
 
 # Big Picture minimizes itself as soon as it loses focus — i.e. the moment a game

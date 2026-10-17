@@ -145,6 +145,19 @@ cannot provide one (sway is the one scanning out to `Virtual-1`), so HDR is not
 reachable on this image as configured — it is a KDE-class-compositor feature
 today.
 
+To drive it, run the session on KWin instead of sway:
+
+```yaml
+    environment:
+      - COMPOSITOR=kwin       # kwin_wayland --drm on the Hermes-KMS card
+```
+
+which requires an image built with `--build-arg WITH_KWIN=true`, Hermes-KMS
+0.4.0 loaded with `hdr_enable=1 color_depth=10`, and a Moonlight client that
+asked for HDR. Diagnostics land in `/var/log/kwin.log` and
+`/var/log/kscreen-doctor.log`. This path is experimental — it has not been
+validated end to end in the container.
+
 To make the module load **automatically on system boot**:
 
 ```bash
@@ -328,6 +341,15 @@ How it works and what to know:
   surface stays alive).
   See "Big Picture Mode minimizes itself after losing focus" in the ArchWiki
   Steam/Troubleshooting page.
+- **Compositor: sway by default, KWin opt-in.** `COMPOSITOR=sway` (default) runs
+  the session on wlroots, which is what Hermes drives over
+  wlr-output-management. `COMPOSITOR=kwin` starts `kwin_wayland --drm` on the
+  Hermes-KMS card instead, pinned with `KWIN_DRM_DEVICES`, with one shared
+  session D-Bus so KScreen can publish the output to Hermes — that is the only
+  session in this image that can drive HDR (see
+  [HDR (module 0.4.0 / Hermes 0.6.0)](#hdr-module-040--hermes-060)). It needs an
+  image built with `--build-arg WITH_KWIN=true` and is experimental: if KWin does
+  not come up, the entrypoint falls back to sway and logs why.
 - **Non-root `steam` user.** Steam refuses to run as root (its `pressure-vessel`
   container runtime misbehaves and pollutes config ownership), so it runs as a
   dedicated `steam` user (uid 1000). sway and Hermes stay root; only the Wayland
@@ -377,6 +399,7 @@ denied`.
 | `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
 | `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered and stream the plain desktop instead. |
+| `COMPOSITOR`       | `sway`                  | Session compositor: `sway` (wlroots, default) or `kwin` (`kwin_wayland --drm`, HDR experiment, needs an image built with `WITH_KWIN=true`). |
 | `STEAM_GAMESCOPE`  | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
 | `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
 | `HERMES_CONFIG`    | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |

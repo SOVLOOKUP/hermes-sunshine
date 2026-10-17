@@ -28,6 +28,9 @@ LABEL org.opencontainers.image.title="hermes-sunshine" \
 ARG HERMES_REPO=MrOz59/Hermes
 ARG HERMES_REF=latest
 ARG USE_CN_MIRROR=true
+# Optional KWin session (COMPOSITOR=kwin) for the HDR experiment. Off by
+# default: sway is the shipped compositor, KWin drags in a KDE stack.
+ARG WITH_KWIN=false
 
 ENV LANG=C.UTF-8 \
     XDG_RUNTIME_DIR=/tmp/runtime \
@@ -39,7 +42,8 @@ ENV LANG=C.UTF-8 \
     START_COMPOSITOR=true \
     START_PIPEWIRE=true \
     START_AVAHI=true \
-    ENABLE_XWAYLAND=true
+    ENABLE_XWAYLAND=true \
+    COMPOSITOR=sway
 
 # Configure mirrors for runtime stage (includes cachyos-v3-mirrorlist)
 RUN set -eu; \
@@ -67,6 +71,9 @@ RUN sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf
 RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
 # Install all packages in a single layer with BuildKit cache mounts
+# WITH_KWIN=true adds the KDE/KWin layer used by COMPOSITOR=kwin (the HDR
+# experiment). It stays out of the default image: sway + Hermes is the
+# shipped path, KWin is only needed where HDR must be driven.
 RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     set -eu; \
     pacman -Sy --noconfirm; \
@@ -93,6 +100,9 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     for g in video render audio input seat; do \
     getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
+    if [ "${WITH_KWIN}" = "true" ]; then \
+    pacman -Sy --noconfirm --needed kwin kscreen; \
+    fi; \
     yes | pacman -Scc; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
 
