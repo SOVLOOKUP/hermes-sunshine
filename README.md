@@ -201,7 +201,12 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
-### X11 and `network_mode: host`
+#Xwayland is started eagerly (`xwayland force`) rather than on demand. With the
+on-demand behaviour, an X11 application launched at session start (Steam) could
+connect before the server was listening and die with "Unable to open a connection
+to X"; the client then saw the desktop while the launcher retried.
+
+## X11 and `network_mode: host`
 
 X11 clients try the abstract socket (`@/tmp/.X11-unix/X<n>`) before the
 filesystem one, and the abstract namespace follows the **network** namespace,

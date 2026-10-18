@@ -310,7 +310,12 @@ setup_headless_env() {
 # directive is injected conditionally rather than always present.
 write_sway_config() {
     local hdr_on="$1" xw="xwayland disable" hdr=""
-    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
+    # "force" instead of "enable": the latter starts Xwayland lazily on the first
+    # X11 client, so an X app launched at session start can hit a window where no
+    # server is listening yet and die with "Unable to open a connection to X"
+    # (Steam in particular did, then the reaper relaunched it in a loop). "force"
+    # brings it up with the compositor, so DISPLAY is always valid.
+    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland force"
     if [ "${hdr_on}" = "true" ]; then
         hdr='output "Virtual-1" hdr on'
     fi
