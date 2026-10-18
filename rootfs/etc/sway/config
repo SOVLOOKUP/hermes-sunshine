@@ -36,7 +36,11 @@ font pango:monospace 10
 # the streamed output. hermes-focus-watch snaps focus back to Virtual-1 when it
 # reappears after a replug.
 output "Virtual-1" position 0 0
-output "HEADLESS-1" position 999999 0 resolution 1x1
+# Keep the placeholder tick-adjacent to Virtual-1 instead of far off to the
+# right: Xwayland's X screen spans the whole layout, and parking it at
+# 999999,0 made the screen ~1,000,000 px wide. steamwebhelper segfaulted
+# (SIGFPE) inside Mesa's libGLX on that geometry.
+output "HEADLESS-1" position 3840 0 resolution 1x1
 workspace 1 output "Virtual-1" "HEADLESS-1"
 
 # Route new toplevels to the captured output (filled in only on the KMS path).
