@@ -212,6 +212,11 @@ that does not ask for a virtual display makes Hermes capture the 1x1 headless
 placeholder at `999999,0` - a 1x1 stream that reports `Display is HDR: false`.
 The entrypoint turns the flag on for all apps at startup.
 
+New toplevels are pinned to the captured output (`for_window ... move container to
+output Virtual-1, fullscreen enable`). Without it, a game started from Big Picture
+mapped onto the idle headless placeholder output: it kept running (Steam showed
+"Continue") while Hermes captured `Virtual-1`, so the client only ever saw Steam.
+
 ## X11 and `network_mode: host`
 
 X11 clients try the abstract socket (`@/tmp/.X11-unix/X<n>`) before the

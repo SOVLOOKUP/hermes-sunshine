@@ -360,7 +360,24 @@ write_sway_config() {
     if [ "${hdr_on}" = "true" ]; then
         hdr='output "Virtual-1" hdr on'
     fi
-    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
+    # New windows must land on the output Hermes captures. With the
+    # drm,headless multi-backend the idle placeholder output still exists, and a
+    # native game launched by Steam mapped there: the game ran (Big Picture
+    # showed "Continue") while Hermes captured Virtual-1, so the client only ever
+    # saw Steam. X11 clients have no app_id, hence the empty-value rule; Wayland
+    # toplevels are covered by the class rule. Only meaningful on the KMS path,
+    # where "Virtual-1" exists.
+    local rules=""
+    if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
+        rules="$(printf '%s\n' \
+            'for_window [app_id=""] move container to output Virtual-1, fullscreen enable, focus, border none' \
+            'for_window [class=".*"] move container to output Virtual-1, fullscreen enable, focus, border none')"
+    fi
+    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" -e "s|__WINDOW_RULES__||" \
+        "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
+    # Appended instead of substituted: sed cannot put a raw newline into a
+    # replacement, and these are two separate config commands.
+    [ -n "${rules}" ] && printf '%s\n' "${rules}" >> "${SWAY_CONFIG}"
 }
 
 # Ask sway which display its Xwayland ended up on. The number is not fixed: it

@@ -38,6 +38,9 @@ font pango:monospace 10
 output "Virtual-1" position 0 0
 output "HEADLESS-1" position 999999 0 resolution 1x1
 workspace 1 output "Virtual-1" "HEADLESS-1"
+
+# Route new toplevels to the captured output (filled in only on the KMS path).
+__WINDOW_RULES__
 output * bg #202020 solid_color
 
 # HDR. Emitted only when the Hermes-KMS module was loaded with
