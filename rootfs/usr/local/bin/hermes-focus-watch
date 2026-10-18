@@ -1,23 +1,47 @@
 #!/usr/bin/env bash
-# Keep sway's focus on the streamed Virtual-1 output.
+# Manage outputs and keep sway's focus on the streamed Virtual-1 output.
 #
 # Hermes unplugs and replugs the per-session "Virtual-1" DRM connector on every
-# app switch. While it is gone sway parks focus on the off-screen HEADLESS-1
-# placeholder; when Virtual-1 comes back sway does NOT move focus back, so the
-# picture streams from Virtual-1 but keyboard/mouse input silently goes to the
-# invisible HEADLESS-1. React to output/workspace events and snap focus back to
-# Virtual-1 whenever it is present and not already focused.
+# app switch. While it is gone, sway needs HEADLESS-1 active so sway does not
+# exit and Hermes can activate virtual outputs.
+#
+# When Virtual-1 is hotplugged, sway auto-assigns it to the right of HEADLESS-1
+# (e.g. 5120,0), which makes Xwayland treat the 720p HEADLESS-1 as the primary
+# display (Display 0) and confuses games (e.g. 4K option disappears, rendering
+# in a tiny top-left box).
+#
+# This watcher:
+# 1. When Virtual-1 is present:
+#    - Moves Virtual-1 to (0,0) as primary
+#    - Disables HEADLESS-1 so X11/Xwayland only sees Virtual-1
+#    - Moves focus to Virtual-1 / workspace 1
+# 2. When Virtual-1 is gone:
+#    - Re-enables HEADLESS-1 at (0,0) to hold the compositor
 set -euo pipefail
 
-get_virtual1_focused() {
-    swaymsg -t get_outputs 2>/dev/null | jq -r '.[] | select(.name=="Virtual-1") | .focused' 2>/dev/null || echo "null"
+has_virtual1() {
+    swaymsg -t get_outputs 2>/dev/null | jq -e '.[] | select(.name=="Virtual-1" and .active==true)' >/dev/null 2>&1
+}
+
+has_headless() {
+    swaymsg -t get_outputs 2>/dev/null | jq -e '.[] | select(.name=="HEADLESS-1" and .active==true)' >/dev/null 2>&1
 }
 
 process_event() {
-    local focused
-    focused="$(get_virtual1_focused)"
-    [ "${focused}" = "true" ] && return 0
-    swaymsg 'workspace 1' >/dev/null 2>&1 || true
+    if has_virtual1; then
+        # Ensure Virtual-1 is at (0, 0) and HEADLESS-1 is disabled
+        swaymsg 'output "Virtual-1" position 0 0' >/dev/null 2>&1 || true
+        if has_headless; then
+            swaymsg 'output "HEADLESS-1" disable' >/dev/null 2>&1 || true
+        fi
+        swaymsg 'workspace 1' >/dev/null 2>&1 || true
+    else
+        # Virtual-1 is absent/disconnected: revive HEADLESS-1 to prevent sway from idling with 0 outputs
+        if ! has_headless; then
+            swaymsg 'output "HEADLESS-1" enable position 0 0 resolution 1280x720' >/dev/null 2>&1 || true
+            swaymsg 'workspace 1' >/dev/null 2>&1 || true
+        fi
+    fi
 }
 
 process_event

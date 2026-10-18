@@ -41,10 +41,11 @@ output "Virtual-1" position 0 0
 # a stream starts, before "Virtual-1" is hotplugged) steamwebhelper died with
 # "trap divide error ... in libGLX_mesa.so.0.0.0" - Mesa dividing by the
 # degenerate mode. The client heard Steam start, saw nothing, and only got a
-# picture after Steam relaunched once the real connector was up. It sits next to
-# Virtual-1 (not at 999999,0, which made the X screen a million pixels wide) and
-# the for_window rules keep every real window on Virtual-1.
-output "HEADLESS-1" position 3840 0 resolution 1280x720
+# picture after Steam relaunched once the real connector was up.
+# hermes-focus-watch automatically moves Virtual-1 to (0,0) and disables
+# HEADLESS-1 as soon as Virtual-1 is hotplugged, and revives HEADLESS-1 when
+# Virtual-1 disconnects.
+output "HEADLESS-1" position 0 0 resolution 1280x720
 workspace 1 output "Virtual-1" "HEADLESS-1"
 
 # Route new toplevels to the captured output (filled in only on the KMS path).
