@@ -177,6 +177,12 @@ To make the module load **automatically on system boot**:
 # Create module auto-load configuration
 echo "hermes_kms" | sudo tee /etc/modules-load.d/hermes-kms.conf
 
+# HDR needs the module parameters, and they must survive boot: if hermes_kms is
+# pulled in from the initramfs the options below are read too late and the module
+# comes up with hdr_enable=N color_depth=8 (no HDR, and the entrypoint falls back
+# to the gles2 renderer). Run mkinitcpio -P after writing the file.
+echo "options hermes_kms initial_enabled=0 hdr_enable=1 color_depth=10" | sudo tee /etc/modprobe.d/hermes-kms.conf
+
 # Set default module parameters. Leave the connector disconnected (0 — the
 # packaged default): this container hotplugs the virtual output per session
 # via headless_mode, and hermes 0.5.1 disconnects unowned enabled outputs at
@@ -201,41 +207,61 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
-#Xwayland stays on demand (`xwayland enable`) and is pre-warmed right after the
-compositor is up: the entrypoint connects once as root (which is what makes sway
-start it) and retries until `xhost +SI:localuser:steam` succeeds. `xwayland
-force` looks tempting but starts Xwayland during compositor init, before the
-Vulkan renderer has a usable DRM fd and before `Virtual-1` is hotplugged; on this
-setup it then never comes up, and Steam dies with "Unable to open a connection to
-X" indefinitely.
+### Xwayland and Steam
+
+Steam's Big Picture UI is an X11 client (CEF), so it needs a working Xwayland.
+Three things have to hold, and each of them failed at some point:
+
+* **`xwayland enable`, never `force`.** `force` starts Xwayland during compositor
+  init, before the Vulkan renderer has a usable DRM fd and before `Virtual-1` is
+  hotplugged; it then never comes up at all and Steam loops with "Unable to open
+  a connection to X". The lazy start is pre-warmed instead: right after the
+  compositor is up the entrypoint connects once as root, which is what makes sway
+  spawn Xwayland, and retries until the grant below succeeds.
+* **Socket permissions.** wlroots creates the X socket with the compositor's
+  umask, so root's `022` yields `0755` — and connecting to a UNIX socket needs
+  write permission. The non-root `steam` user therefore cannot reach the server.
+  The entrypoint chmods `/tmp/.X11-unix` to `1777` and every `X*` socket to `0666`
+  (again after a compositor restart).
+* **Authorization.** Xwayland runs without `-auth`, and an X server in that state
+  only accepts connections from its own uid. Root works, uid 1000 gets
+  "Authorization required, but no authorization protocol specified". The
+  entrypoint runs `xhost +SI:localuser:steam` (that user only — not `xhost +`,
+  which would also let other containers on the shared host network reach the
+  server).
 
 Every app must have `virtual-display` enabled on the KMS path (`apps.json` ships
 `false`). The only real output is the per-session `Virtual-1` connector, so an app
-that does not ask for a virtual display makes Hermes capture the 1x1 headless
-placeholder at `999999,0` - a 1x1 stream that reports `Display is HDR: false`.
-The entrypoint turns the flag on for all apps at startup.
+that does not ask for a virtual display makes Hermes capture the headless
+placeholder - a 1x1 stream that reports `Display is HDR: false`. The entrypoint
+turns the flag on for all apps at startup.
 
 New toplevels are pinned to the captured output (`for_window ... move container to
 output Virtual-1, fullscreen enable`). Without it, a game started from Big Picture
 mapped onto the idle headless placeholder output: it kept running (Steam showed
 "Continue") while Hermes captured `Virtual-1`, so the client only ever saw Steam.
 
+The placeholder output itself needs a **sane mode** (`1280x720`, parked next to
+`Virtual-1`). With a 1x1 mode the X screen is degenerate during the window
+between a stream starting and `Virtual-1` being hotplugged, and `steamwebhelper`
+dies with `trap divide error ... in libGLX_mesa.so.0.0.0`: the client hears Steam
+start, sees nothing, and only gets a picture after Steam relaunches. Parking it at
+`999999,0` is equally bad — that makes the X screen a million pixels wide.
+
 ## X11 and `network_mode: host`
 
-X11 clients try the abstract socket (`@/tmp/.X11-unix/X<n>`) before the
-filesystem one, and the abstract namespace follows the **network** namespace,
-which `network_mode: host` shares with every other container on the machine. If
-any other container runs an X server on `:0` (a browser/desktop container, for
-example), every X client here — Steam included — connects to *that* server and is
-refused for lack of its cookie, which shows up as Steam's "Unable to open a
-connection to X" dialog and an immediate `rc=1` loop. wlroots only binds the
-filesystem socket, which is private to the container, so it would pick the same
-display number and never notice.
+The abstract X11 namespace (`@/tmp/.X11-unix/X<n>`) follows the **network**
+namespace, so with `network_mode: host` this container shares it with the host and
+every other host-network container on the machine. libxcb tries the abstract
+socket before the filesystem one, and wlroots' Xwayland binds both, so
+`DISPLAY=:0` here can be answered by *another* X server — one that will then
+refuse our clients for lack of its cookie.
 
-The entrypoint therefore reserves the filesystem slot for each display that
-already answers on a foreign abstract socket (`/proc/net/unix`), which pushes
-Xwayland onto a display number this container is the only responder for, and
-then exports the `DISPLAY` sway actually reports rather than assuming `:0`.
+That is why the entrypoint asks sway which display it actually created instead of
+assuming `:0`, keeps the X socket directory clean, and grants the `steam` user
+explicit access to our own server (`xhost +SI:localuser:steam`, plus the socket
+permissions described above). A truly isolated setup (its own network namespace)
+removes the whole class of problem at the cost of mDNS discovery.
 
 > **Seat activation in a container.** Driving the DRM output needs an _active_
 > seat session, which a VT-bound seat can only get from a foreground virtual
