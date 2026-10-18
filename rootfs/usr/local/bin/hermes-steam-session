@@ -138,6 +138,13 @@ fi
 XAUTH_ENV=()
 [ -n "${XAUTHORITY:-}" ] && XAUTH_ENV=(XAUTHORITY="${XAUTHORITY}")
 
+# xwayland creates its socket with sway's umask (0755 under root), and connecting
+# to a UNIX socket needs write permission: without this the steam user gets
+# "Unable to open a connection to X" while root succeeds. It is also re-fixed by
+# the entrypoint's watchdog; do it here so a session always starts connectable.
+chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
+
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \

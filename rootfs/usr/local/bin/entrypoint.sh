@@ -194,6 +194,26 @@ start_udev() {
     udevadm settle --timeout=5 >/dev/null 2>&1 || true
 }
 
+# X11 sockets are created by wlroots with the launching process' umask, so sway
+# running as root produces 0755 sockets: the owner may connect, everyone else may
+# only read. Connecting to a UNIX socket requires write permission, which is why
+# the non-root "steam" user got "Unable to open a connection to X" while root
+# worked. Make every X socket world-connectable (and keep the directory sticky,
+# as X expects). Xwayland creates the socket asynchronously, so retry briefly.
+open_x11_sockets() {
+    local i=0
+    while [ "${i}" -lt 20 ]; do
+        chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+        if ls /tmp/.X11-unix/X* >/dev/null 2>&1; then
+            chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.15
+        i=$((i + 1))
+    done
+    return 0
+}
+
 # --- Hermes-KMS module parameters (diagnostics) ------------------------------
 # The HDR path is gated by module parameters that live on the *host*; inside the
 # container they are only reachable through sysfs, and a mismatch (for example
@@ -366,6 +386,9 @@ reserve_foreign_x_displays() {
 # output, publish the X11 display. Kept separate from start_compositor so the
 # watchdog can re-run it after restarting sway.
 post_start_compositor() {
+if [ "${ENABLE_XWAYLAND}" = "true" ]; then
+    open_x11_sockets
+fi
 if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
     # sway is on a drm,headless multi-backend: the DRM backend adopts the
     # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
@@ -524,6 +547,7 @@ start_compositor() {
         restarts=0
         while :; do
             sleep 5
+            [ "${ENABLE_XWAYLAND}" = "true" ] && chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
             if ! pgrep -x sway >/dev/null 2>&1; then
                 restarts=$((restarts + 1))
                 warn "sway exited (restart #${restarts}); bringing the session compositor back"
