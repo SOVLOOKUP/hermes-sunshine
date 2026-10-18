@@ -876,6 +876,33 @@ sanitize_apps() {
     rm -f "${tmp}"
 }
 
+# --- enable virtual displays on the KMS path --------------------------------
+# On hermes-kms the only real output is the per-session "Virtual-1" connector,
+# which exists only while Hermes is serving a session that asked for a virtual
+# display. The shipped app list has "virtual-display": false, and with that
+# Hermes falls back to whatever output the compositor already has - the 1x1
+# headless placeholder at 999999,0. The symptom is a 1x1 stream with
+# "Display is HDR: false" instead of the game. Flip every app on, idempotently;
+# on the headless fallback the flag stays as the user left it.
+enable_virtual_displays() {
+    [ "${KMS_ZEROCOPY}" = "true" ] || return 0
+    [ -f "${APPS_JSON}" ] || return 0
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot enable virtual displays"; return 0; }
+    local tmp; tmp="$(mktemp)"
+    if jq '(.apps[]?["virtual-display"]) = true' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+        if cmp -s "${tmp}" "${APPS_JSON}"; then
+            rm -f "${tmp}"
+        else
+            cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
+            rm -f "${tmp}"
+            log "apps.json: enabled virtual display for every app (Hermes-KMS mode)"
+        fi
+    else
+        rm -f "${tmp}"
+        warn "could not enable virtual displays in apps.json"
+    fi
+}
+
 # --- register the per-session Steam launcher --------------------------------
 # Point the "Steam Big Picture" app's cmd at our per-session
 # launcher so Hermes runs it (at the client's negotiated resolution) when the app
@@ -949,6 +976,7 @@ fi
 
 seed_config
 sanitize_apps
+enable_virtual_displays
 configure_steam_app
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"
