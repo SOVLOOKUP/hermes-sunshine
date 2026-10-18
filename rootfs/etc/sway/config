@@ -36,11 +36,15 @@ font pango:monospace 10
 # the streamed output. hermes-focus-watch snaps focus back to Virtual-1 when it
 # reappears after a replug.
 output "Virtual-1" position 0 0
-# Keep the placeholder tick-adjacent to Virtual-1 instead of far off to the
-# right: Xwayland's X screen spans the whole layout, and parking it at
-# 999999,0 made the screen ~1,000,000 px wide. steamwebhelper segfaulted
-# (SIGFPE) inside Mesa's libGLX on that geometry.
-output "HEADLESS-1" position 3840 0 resolution 1x1
+# The placeholder needs a sane mode, not 1x1: Xwayland's X screen is built from
+# the whole layout, and while it only had the 1x1 placeholder (i.e. right after
+# a stream starts, before "Virtual-1" is hotplugged) steamwebhelper died with
+# "trap divide error ... in libGLX_mesa.so.0.0.0" - Mesa dividing by the
+# degenerate mode. The client heard Steam start, saw nothing, and only got a
+# picture after Steam relaunched once the real connector was up. It sits next to
+# Virtual-1 (not at 999999,0, which made the X screen a million pixels wide) and
+# the for_window rules keep every real window on Virtual-1.
+output "HEADLESS-1" position 3840 0 resolution 1280x720
 workspace 1 output "Virtual-1" "HEADLESS-1"
 
 # Route new toplevels to the captured output (filled in only on the KMS path).
