@@ -149,17 +149,5 @@ bindsym $mod+Shift+3 move container to workspace number 3
 bindsym $mod+Shift+4 move container to workspace number 4
 bindsym $mod+Shift+5 move container to workspace number 5
 
-# --- status bar -------------------------------------------------------------
-# swaybar (bundled with sway) with a lightweight clock; no extra package needed.
-# Fullscreen windows (gamescope/Steam) hide it automatically.
-bar {
-    position top
-    status_command while date +'%Y-%m-%d  %H:%M:%S'; do sleep 1; done
-    colors {
-        statusline #ffffff
-        background #1a1a1aee
-    }
-}
-
 # User overrides: drop *.conf snippets into ./config/sway.d/ on the host.
 include /config/sway.d/*

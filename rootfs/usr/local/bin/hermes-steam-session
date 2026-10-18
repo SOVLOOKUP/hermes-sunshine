@@ -156,6 +156,9 @@ exec runuser -u steam -- env \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${sockpath}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
+    RADV_PERFTEST="${RADV_PERFTEST:-gpl}" \
+    mesa_glthread="${mesa_glthread:-true}" \
+    vblank_mode="${vblank_mode:-0}" \
     "${XENV[@]}" \
     "${XAUTH_ENV[@]}" \
     SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 \

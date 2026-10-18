@@ -27,19 +27,28 @@ has_headless() {
     swaymsg -t get_outputs 2>/dev/null | jq -e '.[] | select(.name=="HEADLESS-1" and .active==true)' >/dev/null 2>&1
 }
 
+# State caching to avoid redundant IPC calls while the session is running
+CURRENT_STATE="unknown"
+
 process_event() {
     if has_virtual1; then
-        # Ensure Virtual-1 is at (0, 0) and HEADLESS-1 is disabled
-        swaymsg 'output "Virtual-1" position 0 0' >/dev/null 2>&1 || true
-        if has_headless; then
-            swaymsg 'output "HEADLESS-1" disable' >/dev/null 2>&1 || true
-        fi
-        swaymsg 'workspace 1' >/dev/null 2>&1 || true
-    else
-        # Virtual-1 is absent/disconnected: revive HEADLESS-1 to prevent sway from idling with 0 outputs
-        if ! has_headless; then
-            swaymsg 'output "HEADLESS-1" enable position 0 0 resolution 1280x720' >/dev/null 2>&1 || true
+        if [ "${CURRENT_STATE}" != "streaming" ]; then
+            # Ensure Virtual-1 is at (0, 0) and HEADLESS-1 is disabled
+            swaymsg 'output "Virtual-1" position 0 0' >/dev/null 2>&1 || true
+            if has_headless; then
+                swaymsg 'output "HEADLESS-1" disable' >/dev/null 2>&1 || true
+            fi
             swaymsg 'workspace 1' >/dev/null 2>&1 || true
+            CURRENT_STATE="streaming"
+        fi
+    else
+        if [ "${CURRENT_STATE}" != "idle" ]; then
+            # Virtual-1 is absent/disconnected: revive HEADLESS-1 to prevent sway from idling with 0 outputs
+            if ! has_headless; then
+                swaymsg 'output "HEADLESS-1" enable position 0 0 resolution 1280x720' >/dev/null 2>&1 || true
+                swaymsg 'workspace 1' >/dev/null 2>&1 || true
+            fi
+            CURRENT_STATE="idle"
         fi
     fi
 }
