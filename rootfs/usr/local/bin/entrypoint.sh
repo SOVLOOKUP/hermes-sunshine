@@ -973,6 +973,25 @@ enable_virtual_displays() {
     fi
 }
 
+# --- drop the desktop-style app ---------------------------------------------
+# This image is streamed as an appliance: the only launcher is "Steam Big
+# Picture". A "Desktop" entry would hand the client an empty sway session (no
+# panel, no launcher, nothing to click), so remove it from the shipped list and
+# from configs created by older versions, idempotently.
+drop_desktop_app() {
+    [ -f "${APPS_JSON}" ] || return 0
+    grep -q '"name": *"Desktop"' "${APPS_JSON}" 2>/dev/null || return 0
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot drop the Desktop app"; return 0; }
+    local tmp; tmp="$(mktemp)"
+    if jq '(.apps // []) |= map(select(.name != "Desktop"))' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+        cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
+        log "apps.json: removed the Desktop app"
+    else
+        warn "could not remove the Desktop app from apps.json"
+    fi
+    rm -f "${tmp}"
+}
+
 # --- register the per-session Steam launcher --------------------------------
 # Point the "Steam Big Picture" app's cmd at our per-session
 # launcher so Hermes runs it (at the client's negotiated resolution) when the app
@@ -1046,6 +1065,7 @@ fi
 
 seed_config
 sanitize_apps
+drop_desktop_app
 enable_virtual_displays
 configure_steam_app
 log "launching hermes with config: ${HERMES_CONFIG}"
