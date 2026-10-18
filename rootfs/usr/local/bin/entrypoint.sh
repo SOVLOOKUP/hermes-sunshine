@@ -511,9 +511,10 @@ start_compositor() {
     # stream then fails with "Couldn't connect to Wayland display" against a
     # stale socket. That is not theoretical -- the Vulkan renderer exits the
     # whole process when an amdgpu buffer allocation fails
-    # ("radv/amdgpu: Failed to allocate a buffer"). Restart it, redo the startup
-    # steps, and after a second crash fall back to gles2, which does not allocate
-    # Vulkan buffers (the only loss is HDR).
+    # ("radv/amdgpu: Failed to allocate a buffer"). Restart it and redo the
+    # startup steps so a dead compositor never takes the stream down with it.
+    # The renderer is NOT downgraded: losing HDR is not an acceptable trade, the
+    # allocation failure itself has to be fixed.
     (
         restarts=0
         while :; do
@@ -521,11 +522,6 @@ start_compositor() {
             if ! pgrep -x sway >/dev/null 2>&1; then
                 restarts=$((restarts + 1))
                 warn "sway exited (restart #${restarts}); bringing the session compositor back"
-                if [ "${restarts}" -ge 2 ] && [ "${WLR_RENDERER}" = "vulkan" ]; then
-                    warn "switching to the gles2 renderer after repeated sway crashes (HDR off)"
-                    export WLR_RENDERER=gles2
-                    write_sway_config "false"
-                fi
                 if launch_sway; then
                     post_start_compositor
                 else

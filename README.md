@@ -160,8 +160,9 @@ the whole compositor when an amdgpu buffer allocation fails
 (`radv/amdgpu: Failed to allocate a buffer`), which used to leave the container
 running with a stale Wayland socket and every later stream failing with
 "Couldn't connect to Wayland display". sway is therefore supervised: if it exits,
-the entrypoint restarts it and redoes the output/`DISPLAY` setup, and after a
-second crash it switches to the gles2 renderer (HDR off, streaming stays up).
+the entrypoint restarts it and redoes the output/`DISPLAY` setup. The renderer
+is deliberately *not* downgraded on restart -- HDR is the reason Vulkan is used,
+so the allocation failure has to be fixed instead of papered over.
 
 HDR also constrains the renderer: sway refuses to enable it on the gles2
 renderer ("Cannot enable HDR on output Virtual-1: renderer doesn't support output
