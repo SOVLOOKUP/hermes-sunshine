@@ -145,6 +145,12 @@ XAUTH_ENV=()
 chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
 
+# Xwayland runs without -auth, so it only accepts its own uid (root); grant the
+# steam user explicitly. Harmless if the entrypoint already did it.
+if [ "${STEAM_GAMESCOPE}" != "true" ] && command -v xhost >/dev/null 2>&1; then
+    DISPLAY="${XENV[0]#DISPLAY=}" xhost +SI:localuser:steam >/dev/null 2>&1 || true
+fi
+
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \

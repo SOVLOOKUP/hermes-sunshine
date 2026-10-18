@@ -214,6 +214,27 @@ open_x11_sockets() {
     return 0
 }
 
+# Xwayland runs as root without -auth, and an X server without an auth file only
+# accepts connections from its own uid: root can talk to it, the non-root steam
+# user gets "Authorization required, but no authorization protocol specified"
+# and Steam exits with "Unable to open a connection to X". Grant exactly that one
+# local user (not "+", which would let any other container on the host network
+# namespace reach our X server).
+allow_steam_x11() {
+    local d="${DISPLAY:-:0}" i=0
+    command -v xhost >/dev/null 2>&1 || { warn "xhost missing; steam cannot reach Xwayland"; return 0; }
+    id steam >/dev/null 2>&1 || return 0
+    while [ "${i}" -lt 20 ]; do
+        if DISPLAY="${d}" xhost +SI:localuser:steam >/dev/null 2>&1; then
+            log "X11: allowed local user steam to connect to ${d}"
+            return 0
+        fi
+        sleep 0.15
+        i=$((i + 1))
+    done
+    warn "could not grant steam access to X display ${d}"
+}
+
 # --- Hermes-KMS module parameters (diagnostics) ------------------------------
 # The HDR path is gated by module parameters that live on the *host*; inside the
 # container they are only reachable through sysfs, and a mismatch (for example
@@ -442,6 +463,7 @@ if [ "${ENABLE_XWAYLAND}" = "true" ]; then
     xdisp="$(sway_x_display 2>/dev/null || true)"
     export DISPLAY="${xdisp:-${DISPLAY:-:0}}"
     log "XWayland enabled (DISPLAY=${DISPLAY}) for X11 application compatibility"
+    allow_steam_x11
 fi
 }
 
