@@ -163,10 +163,16 @@ exec runuser -u steam -- env \
     "${DBUS_WRAP[@]}" \
     "${COMPOSITOR_CMD[@]}" \
     bash -c '
+        # -cef-disable-gpu / -cef-disable-gpu-compositing: Steam wraps its UI in
+        # CEF (steamwebhelper), which on this Mesa + Xwayland stack dies with
+        # "trap divide error ... in libGLX_mesa.so.0.0.0" once it renders through
+        # GL. Each crash makes Big Picture vanish and leaves a "Game crashed with
+        # signal 11" dialog fullscreened on the stream. Rendering CEF on the CPU
+        # costs a little latency but removes that crash path entirely.
         delay=2; max=60
         while :; do
             SECONDS=0
-            steam -gamepadui
+            steam -gamepadui -cef-disable-gpu -cef-disable-gpu-compositing
             rc=$?
             ran=$SECONDS
             [ "${ran}" -ge 30 ] && delay=2
