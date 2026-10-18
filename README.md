@@ -201,10 +201,13 @@ flow is:
 Set the `HERMES_KMS` variable to `on`/`off`/`auto` (default `auto`) to force or
 disable this path.
 
-#Xwayland is started eagerly (`xwayland force`) rather than on demand. With the
-on-demand behaviour, an X11 application launched at session start (Steam) could
-connect before the server was listening and die with "Unable to open a connection
-to X"; the client then saw the desktop while the launcher retried.
+#Xwayland stays on demand (`xwayland enable`) and is pre-warmed right after the
+compositor is up: the entrypoint connects once as root (which is what makes sway
+start it) and retries until `xhost +SI:localuser:steam` succeeds. `xwayland
+force` looks tempting but starts Xwayland during compositor init, before the
+Vulkan renderer has a usable DRM fd and before `Virtual-1` is hotplugged; on this
+setup it then never comes up, and Steam dies with "Unable to open a connection to
+X" indefinitely.
 
 Every app must have `virtual-display` enabled on the KMS path (`apps.json` ships
 `false`). The only real output is the per-session `Virtual-1` connector, so an app

@@ -224,7 +224,10 @@ allow_steam_x11() {
     local d="${DISPLAY:-:0}" i=0
     command -v xhost >/dev/null 2>&1 || { warn "xhost missing; steam cannot reach Xwayland"; return 0; }
     id steam >/dev/null 2>&1 || return 0
-    while [ "${i}" -lt 20 ]; do
+    # The first connect attempt is what makes sway start Xwayland (lazy "xwayland
+    # enable"), and that takes a few seconds, hence the wide retry budget: this
+    # doubles as the pre-warm that keeps Steam from racing the X server.
+    while [ "${i}" -lt 60 ]; do
         if DISPLAY="${d}" xhost +SI:localuser:steam >/dev/null 2>&1; then
             log "X11: allowed local user steam to connect to ${d}"
             return 0
@@ -232,7 +235,7 @@ allow_steam_x11() {
         sleep 0.15
         i=$((i + 1))
     done
-    warn "could not grant steam access to X display ${d}"
+    warn "could not grant steam access to X display ${d} (is Xwayland up?)"
 }
 
 # --- Hermes-KMS module parameters (diagnostics) ------------------------------
@@ -351,12 +354,13 @@ setup_headless_env() {
 # directive is injected conditionally rather than always present.
 write_sway_config() {
     local hdr_on="$1" xw="xwayland disable" hdr=""
-    # "force" instead of "enable": the latter starts Xwayland lazily on the first
-    # X11 client, so an X app launched at session start can hit a window where no
-    # server is listening yet and die with "Unable to open a connection to X"
-    # (Steam in particular did, then the reaper relaunched it in a loop). "force"
-    # brings it up with the compositor, so DISPLAY is always valid.
-    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland force"
+    # Keep the lazy "enable" behaviour: "force" starts Xwayland during compositor
+    # init, before the Vulkan renderer has a usable DRM fd and before "Virtual-1"
+    # is hotplugged, and on this setup it then never comes up at all (Steam gets
+    # "Unable to open a connection to X" forever). The startup race that "force"
+    # was meant to fix is handled instead by allow_steam_x11, which connects once
+    # as root right after the compositor is up and thereby triggers the lazy start.
+    [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
     if [ "${hdr_on}" = "true" ]; then
         hdr='output "Virtual-1" hdr on'
     fi
