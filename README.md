@@ -155,6 +155,14 @@ asked for HDR it cannot scan out. Rendering stays on the real GPU — HDR costs
 nothing in the capture path. Hermes then logs `Display is HDR: true`, `Color
 depth: 10-bit` and `Virtual-1 scanout confirmed HDR`.
 
+The renderer choice has a failure mode worth knowing: the Vulkan renderer exits
+the whole compositor when an amdgpu buffer allocation fails
+(`radv/amdgpu: Failed to allocate a buffer`), which used to leave the container
+running with a stale Wayland socket and every later stream failing with
+"Couldn't connect to Wayland display". sway is therefore supervised: if it exits,
+the entrypoint restarts it and redoes the output/`DISPLAY` setup, and after a
+second crash it switches to the gles2 renderer (HDR off, streaming stays up).
+
 HDR also constrains the renderer: sway refuses to enable it on the gles2
 renderer ("Cannot enable HDR on output Virtual-1: renderer doesn't support output
 color transforms"), so the entrypoint selects `WLR_RENDERER=vulkan` automatically

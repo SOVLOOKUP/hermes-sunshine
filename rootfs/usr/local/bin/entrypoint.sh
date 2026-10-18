@@ -357,6 +357,66 @@ reserve_foreign_x_displays() {
     done
 }
 
+# Everything that has to happen once a compositor is up: adopt the Hermes-KMS
+# output, publish the X11 display. Kept separate from start_compositor so the
+# watchdog can re-run it after restarting sway.
+post_start_compositor() {
+if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
+    # sway is on a drm,headless multi-backend: the DRM backend adopts the
+    # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
+    # by headless_mode in sunshine.conf) and Hermes reads that connector
+    # zero-copy; the headless backend contributes one idle placeholder output.
+    # The placeholder is what lets Hermes' virtual-output activation succeed:
+    # it bails instantly on an empty output layout and only waits for the
+    # hotplug once a head exists (see setup_kms_env). We must NOT force a mode
+    # onto card1 here — Hermes owns "Virtual-1" per session, and capture picks
+    # the output by connector name, so the placeholder is harmless.
+    # Some wlroots builds bring the headless backend up with zero outputs, which
+    # would defeat the placeholder, so create one explicitly if the layout is
+    # still empty.
+    local heads
+    heads="$(swaymsg -t get_outputs 2>/dev/null | grep -c '"name"' || true)"
+    if [ "${heads:-0}" -eq 0 ]; then
+        swaymsg create_output >/dev/null 2>&1 || true
+        sleep 0.3
+    fi
+    log "sway idling on ${HERMES_KMS_CARD} with a headless placeholder; Hermes will hotplug Virtual-1 per session"
+else
+    # Headless fallback: Hermes captures sway's own output directly, so ensure
+    # one exists and carries the requested mode.
+    local out
+    out="$(swaymsg -t get_outputs 2>/dev/null \
+        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+        | sed -E 's/.*"([^"]+)"$/\1/')"
+    if [ -z "${out}" ]; then
+        # Some wlroots builds start the headless backend with zero outputs;
+        # create one explicitly so there is a surface to capture.
+        swaymsg create_output >/dev/null 2>&1 || true
+        sleep 0.3
+        out="$(swaymsg -t get_outputs 2>/dev/null \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')"
+    fi
+    if [ -n "${out}" ]; then
+        log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
+        swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
+            || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
+            || warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out}"
+    else
+        warn "could not determine the compositor output name (see /var/log/sway.log)"
+    fi
+fi
+
+# Surface the XWayland DISPLAY for X11-only apps launched by the host,
+# taking it from sway rather than assuming :0 (see sway_x_display).
+if [ "${ENABLE_XWAYLAND}" = "true" ]; then
+    local xdisp
+    xdisp="$(sway_x_display 2>/dev/null || true)"
+    export DISPLAY="${xdisp:-${DISPLAY:-:0}}"
+    log "XWayland enabled (DISPLAY=${DISPLAY}) for X11 application compatibility"
+fi
+}
+
 start_compositor() {
     # Build the effective sway config from the template (resolution is applied
     # afterwards via swaymsg, since the output name depends on the backend).
@@ -445,60 +505,35 @@ start_compositor() {
         return 1
     fi
 
-    if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
-        # sway is on a drm,headless multi-backend: the DRM backend adopts the
-        # per-session "Virtual-1" connector Hermes hotplugs on this card (enabled
-        # by headless_mode in sunshine.conf) and Hermes reads that connector
-        # zero-copy; the headless backend contributes one idle placeholder output.
-        # The placeholder is what lets Hermes' virtual-output activation succeed:
-        # it bails instantly on an empty output layout and only waits for the
-        # hotplug once a head exists (see setup_kms_env). We must NOT force a mode
-        # onto card1 here — Hermes owns "Virtual-1" per session, and capture picks
-        # the output by connector name, so the placeholder is harmless.
-        # Some wlroots builds bring the headless backend up with zero outputs, which
-        # would defeat the placeholder, so create one explicitly if the layout is
-        # still empty.
-        local heads
-        heads="$(swaymsg -t get_outputs 2>/dev/null | grep -c '"name"' || true)"
-        if [ "${heads:-0}" -eq 0 ]; then
-            swaymsg create_output >/dev/null 2>&1 || true
-            sleep 0.3
-        fi
-        log "sway idling on ${HERMES_KMS_CARD} with a headless placeholder; Hermes will hotplug Virtual-1 per session"
-    else
-        # Headless fallback: Hermes captures sway's own output directly, so ensure
-        # one exists and carries the requested mode.
-        local out
-        out="$(swaymsg -t get_outputs 2>/dev/null \
-            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-            | sed -E 's/.*"([^"]+)"$/\1/')"
-        if [ -z "${out}" ]; then
-            # Some wlroots builds start the headless backend with zero outputs;
-            # create one explicitly so there is a surface to capture.
-            swaymsg create_output >/dev/null 2>&1 || true
-            sleep 0.3
-            out="$(swaymsg -t get_outputs 2>/dev/null \
-                | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-                | sed -E 's/.*"([^"]+)"$/\1/')"
-        fi
-        if [ -n "${out}" ]; then
-            log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
-            swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-                || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-                || warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out}"
-        else
-            warn "could not determine the compositor output name (see /var/log/sway.log)"
-        fi
-    fi
+    post_start_compositor
 
-    # Surface the XWayland DISPLAY for X11-only apps launched by the host,
-    # taking it from sway rather than assuming :0 (see sway_x_display).
-    if [ "${ENABLE_XWAYLAND}" = "true" ]; then
-        local xdisp
-        xdisp="$(sway_x_display 2>/dev/null || true)"
-        export DISPLAY="${xdisp:-${DISPLAY:-:0}}"
-        log "XWayland enabled (DISPLAY=${DISPLAY}) for X11 application compatibility"
-    fi
+    # Nothing supervises sway: if it dies the container keeps running, but every
+    # stream then fails with "Couldn't connect to Wayland display" against a
+    # stale socket. That is not theoretical -- the Vulkan renderer exits the
+    # whole process when an amdgpu buffer allocation fails
+    # ("radv/amdgpu: Failed to allocate a buffer"). Restart it, redo the startup
+    # steps, and after a second crash fall back to gles2, which does not allocate
+    # Vulkan buffers (the only loss is HDR).
+    (
+        restarts=0
+        while :; do
+            sleep 5
+            if ! pgrep -x sway >/dev/null 2>&1; then
+                restarts=$((restarts + 1))
+                warn "sway exited (restart #${restarts}); bringing the session compositor back"
+                if [ "${restarts}" -ge 2 ] && [ "${WLR_RENDERER}" = "vulkan" ]; then
+                    warn "switching to the gles2 renderer after repeated sway crashes (HDR off)"
+                    export WLR_RENDERER=gles2
+                    write_sway_config "false"
+                fi
+                if launch_sway; then
+                    post_start_compositor
+                else
+                    warn "could not restart sway; retrying in 5s"
+                fi
+            fi
+        done
+    ) &
 }
 
 # --- audio (PipeWire) -------------------------------------------------------
