@@ -372,7 +372,10 @@ write_sway_config() {
     # toplevels are covered by the class rule. Only meaningful on the KMS path,
     # where "Virtual-1" exists.
     local rules=""
-    if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
+    # Gate on the detected KMS device, not KMS_ZEROCOPY: that flag only becomes
+    # true after sway has started (below), so gating the config on it silently
+    # emitted no rules at all.
+    if [ -n "${HERMES_KMS_CARD:-}" ]; then
         rules="$(printf '%s\n' \
             'for_window [app_id=""] move container to output Virtual-1, fullscreen enable, focus, border none' \
             'for_window [class=".*"] move container to output Virtual-1, fullscreen enable, focus, border none')"
