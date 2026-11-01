@@ -61,10 +61,18 @@ start_dbus() {
 }
 
 # --- mDNS discovery (Moonlight auto-discovery) ------------------------------
+# Do not throw stderr away: a bare "failed to start" is undiagnosable (a host
+# avahi conflict, a dbus problem and a broken interface all look identical from
+# here), while avahi's one real error line points straight at the cause. Capture
+# stderr and append the first informative line to the warning on failure.
 start_avahi() {
-    avahi-daemon --no-chroot -D 2>/dev/null \
-        && log "avahi-daemon started" \
-        || warn "avahi-daemon failed to start (discovery via manual IP still works)"
+    local err=""
+    if err="$(avahi-daemon --no-chroot -D 2>&1 >/dev/null)"; then
+        log "avahi-daemon started"
+    else
+        err="$(printf '%s\n' "${err}" | sed -n '/[^[:space:]]/p' | head -n 1)"
+        warn "avahi-daemon failed to start (discovery via manual IP still works)${err:+: ${err}}"
+    fi
 }
 
 # --- device detection: Hermes-KMS virtual display + real render GPU ---------
@@ -222,20 +230,32 @@ open_x11_sockets() {
 # namespace reach our X server).
 allow_steam_x11() {
     local d="${DISPLAY:-:0}" i=0
-    command -v xhost >/dev/null 2>&1 || { warn "xhost missing; steam cannot reach Xwayland"; return 0; }
-    id steam >/dev/null 2>&1 || return 0
+    # X11_STEAM_GRANTED is a status flag consumed by the sway watchdog below:
+    # "" = keep retrying, 1 = granted, "unsupported" = xhost missing or no steam
+    # user, where retrying can never succeed.
+    X11_STEAM_GRANTED=""
+    if ! command -v xhost >/dev/null 2>&1; then
+        warn "xhost missing; steam cannot reach Xwayland"
+        X11_STEAM_GRANTED=unsupported
+        return 0
+    fi
+    if ! id steam >/dev/null 2>&1; then
+        X11_STEAM_GRANTED=unsupported
+        return 0
+    fi
     # The first connect attempt is what makes sway start Xwayland (lazy "xwayland
     # enable"), and that takes a few seconds, hence the wide retry budget: this
     # doubles as the pre-warm that keeps Steam from racing the X server.
     while [ "${i}" -lt 60 ]; do
         if DISPLAY="${d}" xhost +SI:localuser:steam >/dev/null 2>&1; then
             log "X11: allowed local user steam to connect to ${d}"
+            X11_STEAM_GRANTED=1
             return 0
         fi
         sleep 0.15
         i=$((i + 1))
     done
-    warn "could not grant steam access to X display ${d} (is Xwayland up?)"
+    warn "could not grant steam access to X display ${d} (is Xwayland up?; the sway watchdog keeps retrying)"
 }
 
 # --- Hermes-KMS module parameters (diagnostics) ------------------------------
@@ -594,6 +614,17 @@ start_compositor() {
         while :; do
             sleep 5
             [ "${ENABLE_XWAYLAND}" = "true" ] && chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
+            # allow_steam_x11 can lose the lazy Xwayland startup race on a busy
+            # boot (it only waits ~9s). Retry the grant once per tick so a
+            # stream-time "Unable to open a connection to X" never comes from a
+            # lost startup race. post_start_compositor (initial boot and after
+            # every sway restart) re-runs allow_steam_x11, which re-derives the
+            # flag for the new X server.
+            if [ "${ENABLE_XWAYLAND}" = "true" ] && [ -z "${X11_STEAM_GRANTED:-}" ] \
+                && DISPLAY="${DISPLAY:-:0}" xhost +SI:localuser:steam >/dev/null 2>&1; then
+                X11_STEAM_GRANTED=1
+                log "X11: allowed local user steam to connect to ${DISPLAY:-:0} (late grant)"
+            fi
             if ! pgrep -x sway >/dev/null 2>&1; then
                 restarts=$((restarts + 1))
                 warn "sway exited (restart #${restarts}); bringing the session compositor back"

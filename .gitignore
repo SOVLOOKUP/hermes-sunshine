@@ -32,5 +32,7 @@ nm-fake/Cargo.lock
 *.bak
 *.tmp
 
+/.dsh-vision-router/
+
 
 nm-fake/target/
