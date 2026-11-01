@@ -993,6 +993,9 @@ seed_config() {
         set_conf_key virtual_display_backend headless
         set_conf_key headless_mode disabled
     fi
+    if [ -n "${RENDER_NODE:-}" ]; then
+        set_conf_key adapter_name "${RENDER_NODE}"
+    fi
     # Audio: let Hermes fully own its loopback sinks. It creates
     # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
     # stream's channel layout as the PipeWire default (so Steam/games play into

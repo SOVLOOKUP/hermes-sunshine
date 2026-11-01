@@ -181,6 +181,7 @@ exec runuser -u steam -- env \
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY##*/}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     RADV_PERFTEST="${RADV_PERFTEST:-gpl}" \
+    DRI_PRIME="${DRI_PRIME:-1}" \
     mesa_glthread="${mesa_glthread:-true}" \
     vblank_mode="${vblank_mode:-0}" \
     "${XENV[@]}" \
