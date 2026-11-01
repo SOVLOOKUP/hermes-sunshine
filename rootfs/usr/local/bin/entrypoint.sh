@@ -121,14 +121,38 @@ detect_devices() {
         fi
     done
 
-    # Real render node for GPU rendering + hardware encoding: the first
-    # renderD* that is NOT provided by hermes_kms (which is not a render GPU).
+    # Log all render nodes and their drivers
     for node in /dev/dri/renderD*; do
         [ -e "${node}" ] || continue
-        is_hermes_kms "$(drm_driver "${node}")" && continue
-        RENDER_NODE="${node}"
-        break
+        drv="$(drm_driver "${node}")"
+        log "DRM render ${node}: driver=${drv:-unknown}"
     done
+
+    # Real render node for GPU rendering + hardware encoding:
+    # 1. Respect user override from environment (e.g. RENDER_NODE=/dev/dri/renderD129 or RENDER_NODE=129)
+    if [ -n "${RENDER_NODE:-}" ]; then
+        case "${RENDER_NODE}" in
+            /dev/dri/renderD*) ;;
+            renderD*) RENDER_NODE="/dev/dri/${RENDER_NODE}" ;;
+            [0-9]*)   RENDER_NODE="/dev/dri/renderD${RENDER_NODE}" ;;
+        esac
+        if [ -e "${RENDER_NODE}" ]; then
+            log "using user-specified render/encode GPU node: ${RENDER_NODE}"
+        else
+            warn "specified render node ${RENDER_NODE} does not exist, falling back to auto-detection"
+            RENDER_NODE=""
+        fi
+    fi
+
+    # 2. Auto-detect: first renderD* that is NOT provided by hermes_kms
+    if [ -z "${RENDER_NODE:-}" ]; then
+        for node in /dev/dri/renderD*; do
+            [ -e "${node}" ] || continue
+            is_hermes_kms "$(drm_driver "${node}")" && continue
+            RENDER_NODE="${node}"
+            break
+        done
+    fi
 
     if [ -n "${HERMES_KMS_CARD}" ]; then
         log "Hermes-KMS virtual display: ${HERMES_KMS_CARD}"
@@ -760,6 +784,8 @@ start_pipewire_watchdog() {
 grant_gpu_access() {
     local user="$1" node gid gname
     id "${user}" >/dev/null 2>&1 || return 0
+    # Ensure all DRI nodes are world readable/writable so steam can open any GPU node
+    chmod 0666 /dev/dri/card[0-9]* /dev/dri/renderD[0-9]* 2>/dev/null || true
     # Clean up a dangerous legacy grant: older versions added the user to the
     # root group for root:root DRM nodes (see the gid-0 skip below). Group
     # membership persists in the container filesystem across container restarts,
