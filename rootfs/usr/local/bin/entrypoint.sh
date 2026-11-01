@@ -953,7 +953,11 @@ seed_config() {
             && log "migrated ${LEGACY_SUNSHINE_APPS} -> ${APPS_JSON}"
     fi
     touch "${HERMES_CONFIG}"
-    ensure_conf_key address_family both
+    if [ -n "${ADDRESS_FAMILY:-}" ]; then
+        set_conf_key address_family "${ADDRESS_FAMILY}"
+    else
+        ensure_conf_key address_family both
+    fi
     ensure_conf_key upnp enabled
     ensure_conf_key system_tray disabled
     if [ "${KMS_ZEROCOPY}" = "true" ]; then
@@ -1156,11 +1160,21 @@ else
     warn "/dev/dri not present — no GPU. Wayland capture/hardware encoding will not work."
 fi
 
+check_stream_ports() {
+    # Port 47999 (0xBB7F in hex) is the ENet control/handshake port.
+    # When occupied by a lingering process or duplicate container, streaming will fail with
+    # "Couldn't create an ENet host on [:::47999]; the port is most likely already in use."
+    if grep -iqE '[[:space:]][0-9A-F]+:BB7F[[:space:]]' /proc/net/udp /proc/net/udp6 2>/dev/null; then
+        warn "UDP port 47999 is currently occupied on the host network. If an existing sunshine/hermes instance or previous session is lingering, streaming will fail with ENet bind error. Run 'sudo ss -ulpn | grep 47999' on the host to inspect."
+    fi
+}
+
 seed_config
 sanitize_apps
 drop_desktop_app
 enable_virtual_displays
 configure_steam_app
+check_stream_ports
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"
 cd /config
