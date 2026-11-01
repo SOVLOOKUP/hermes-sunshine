@@ -40,30 +40,24 @@ ENV LANG=C.UTF-8 \
     START_AVAHI=true \
     ENABLE_XWAYLAND=true
 
-# Configure mirrors for runtime stage (includes cachyos-v3-mirrorlist)
+# Configure mirrors for runtime stage, multilib, NoExtract, and disable ALPM sandbox network
 RUN set -eu; \
     if [ "${USE_CN_MIRROR}" = "true" ]; then \
-    prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
-    { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
-    prepend /etc/pacman.d/mirrorlist \
-    'https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' \
-    'https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch'; \
-    prepend /etc/pacman.d/cachyos-mirrorlist \
-    'https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo' \
-    'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch/$repo'; \
-    prepend /etc/pacman.d/cachyos-v3-mirrorlist \
-    'https://mirrors.ustc.edu.cn/cachyos/repo/$arch_v3/$repo' \
-    'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch_v3/$repo'; \
-    fi
-
-# Skip docs/manpages to reduce image size
-RUN sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/share/info/* usr/share/gtk-doc/* usr/share/help/* usr/share/locale/* !usr/share/locale/locale.alias' /etc/pacman.conf
-
-# Disable CachyOS ALPM sandbox network (bubblewrap doesn't work in Docker)
-RUN sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf
-
-# Enable multilib for 32-bit libraries
-RUN sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
+        prepend() { f="$1"; shift; [ -f "$f" ] || return 0; t="$(mktemp)"; \
+        { for s in "$@"; do echo "Server = $s"; done; cat "$f"; } > "$t" && mv "$t" "$f"; }; \
+        prepend /etc/pacman.d/mirrorlist \
+            'https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch' \
+            'https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch'; \
+        prepend /etc/pacman.d/cachyos-mirrorlist \
+            'https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo' \
+            'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch/$repo'; \
+        prepend /etc/pacman.d/cachyos-v3-mirrorlist \
+            'https://mirrors.ustc.edu.cn/cachyos/repo/$arch_v3/$repo' \
+            'https://mirrors.tuna.tsinghua.edu.cn/cachyos/repo/$arch_v3/$repo'; \
+    fi; \
+    sed -i '/^\[options\]/a NoExtract = usr/share/man/* usr/share/doc/* usr/share/info/* usr/share/gtk-doc/* usr/share/help/* usr/share/locale/* !usr/share/locale/locale.alias' /etc/pacman.conf; \
+    sed -i '/^\[options\]/a DisableSandboxNetwork' /etc/pacman.conf; \
+    sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
 
 # Install all packages in a single layer with BuildKit cache mounts
 # sway (wlroots) is the session compositor. It renders on the real GPU
@@ -75,7 +69,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     pacman -Sy --noconfirm; \
     ref="${HERMES_REF}"; \
     if [ "${ref}" = "latest" ]; then \
-    ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
+        ref="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%{url_effective}' https://github.com/${HERMES_REPO}/releases/latest | sed 's#.*/tag/##')"; \
     fi; \
     echo "Hermes release tag: ${ref}"; \
     path="$(curl -fsSL --retry 3 --retry-delay 2 "https://github.com/${HERMES_REPO}/releases/expanded_assets/${ref}" | grep -oE "/${HERMES_REPO}/releases/download/[^\"]+x86_64\.pkg\.tar\.zst" | head -n1)"; \
@@ -85,21 +79,24 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
     pacman -S --noconfirm --needed \
-    curl libva-utils dbus avahi mesa sway seatd xorg-xhost xorg-xwayland xorg-xauth xorg-xdpyinfo \
-    wl-clipboard xclip foot wofi jq \
-    pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
-    steam gamescope noto-fonts noto-fonts-cjk \
-    vulkan-radeon lib32-vulkan-radeon lib32-mesa \
-    vulkan-icd-loader lib32-vulkan-icd-loader lib32-libva-mesa-driver lib32-libpulse; \
+        curl libva-utils dbus avahi mesa sway seatd xorg-xhost xorg-xwayland xorg-xauth xorg-xdpyinfo \
+        wl-clipboard xclip foot wofi jq \
+        pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
+        steam gamescope noto-fonts wqy-zenhei \
+        vulkan-radeon lib32-vulkan-radeon lib32-mesa \
+        vulkan-icd-loader lib32-vulkan-icd-loader lib32-libva-mesa-driver lib32-libpulse; \
+    setcap cap_sys_admin+p /usr/bin/hermes || true; \
+    setcap cap_sys_admin+ep /usr/bin/sway || true; \
     useradd --system --user-group --home-dir / --shell /usr/bin/nologin --comment Avahi avahi 2>/dev/null || true; \
     useradd --uid 1000 --user-group --create-home --home-dir /home/steam --shell /bin/bash steam; \
     for g in video render audio input seat; do \
-    getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
+        getent group "$g" >/dev/null 2>&1 && usermod -aG "$g" steam || true; \
     done; \
     yes | pacman -Scc; \
+    rm -rf /usr/share/man/* /usr/share/doc/* /usr/share/info/* /usr/share/gtk-doc/* /usr/share/help/* 2>/dev/null || true; \
+    find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name 'zh*' ! -name 'locale.alias' -exec rm -rf {} + 2>/dev/null || true; \
+    find /usr -type f -name '*.a' -delete 2>/dev/null || true; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
-
-RUN setcap cap_sys_admin+p /usr/bin/hermes || true; setcap cap_sys_admin+ep /usr/bin/sway || true
 
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
