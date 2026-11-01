@@ -22,7 +22,9 @@ PIDS=()
 cleanup() {
     log "shutting down..."
     for pid in "${PIDS[@]:-}"; do
-        [ -n "${pid}" ] && kill "${pid}" 2>/dev/null || true
+        if [ -n "${pid}" ]; then
+            kill "${pid}" 2>/dev/null || true
+        fi
     done
 }
 trap cleanup EXIT INT TERM
@@ -54,9 +56,11 @@ start_dbus() {
     dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
     mkdir -p /run/dbus
     if [ ! -S /run/dbus/system_bus_socket ]; then
-        dbus-daemon --system --fork 2>/dev/null \
-            && log "dbus system bus started" \
-            || warn "dbus failed to start"
+        if dbus-daemon --system --fork 2>/dev/null; then
+            log "dbus system bus started"
+        else
+            warn "dbus failed to start"
+        fi
     fi
 }
 
@@ -193,9 +197,12 @@ start_udev() {
         warn "udevd not found; wlroots may not see the Hermes-KMS hotplug (install systemd/udev)"
         return 1
     fi
-    "${udevd}" --daemon 2>/var/log/udevd.log \
-        && log "udevd started (${udevd})" \
-        || { warn "udevd failed to start (see /var/log/udevd.log)"; return 1; }
+    if "${udevd}" --daemon 2>/var/log/udevd.log; then
+        log "udevd started (${udevd})"
+    else
+        warn "udevd failed to start (see /var/log/udevd.log)"
+        return 1
+    fi
     # Prime the DRM subsystem so any already-present connector is tagged, then wait
     # for the queue to drain before sway enumerates outputs.
     udevadm trigger --subsystem-match=drm --action=add >/dev/null 2>&1 || true
@@ -250,6 +257,8 @@ allow_steam_x11() {
         if DISPLAY="${d}" xhost +SI:localuser:steam >/dev/null 2>&1; then
             log "X11: allowed local user steam to connect to ${d}"
             X11_STEAM_GRANTED=1
+            chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+            chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
             return 0
         fi
         sleep 0.15
@@ -294,7 +303,8 @@ launch_sway() {
     done
     if [ -n "${sock}" ] && kill -0 "${pid}" 2>/dev/null; then
         PIDS+=("${pid}")
-        export WAYLAND_DISPLAY="$(basename "${sock}")"
+        WAYLAND_DISPLAY="$(basename "${sock}")"
+        export WAYLAND_DISPLAY
         # swaymsg locates sway's IPC socket via SWAYSOCK; sway only exports it to
         # its own children, so publish it here (it appears alongside the Wayland
         # socket) — without it swaymsg cannot query/set outputs.
@@ -400,11 +410,16 @@ write_sway_config() {
             'for_window [app_id=""] move container to output Virtual-1, fullscreen enable, focus, border none' \
             'for_window [class=".*"] move container to output Virtual-1, fullscreen enable, focus, border none')"
     fi
-    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" -e "s|__WINDOW_RULES__||" \
+    sed -e "s/__XWAYLAND__/${xw}/g" -e "s|__HDR__|${hdr}|g" \
         "${SWAY_TEMPLATE}" > "${SWAY_CONFIG}"
-    # Appended instead of substituted: sed cannot put a raw newline into a
-    # replacement, and these are two separate config commands.
-    [ -n "${rules}" ] && printf '%s\n' "${rules}" >> "${SWAY_CONFIG}"
+    if [ -n "${rules}" ]; then
+        local tmp_cfg
+        tmp_cfg="$(mktemp)"
+        awk -v r="${rules}" 'index($0, "__WINDOW_RULES__") { print r; next } 1' "${SWAY_CONFIG}" > "${tmp_cfg}" \
+            && mv -f "${tmp_cfg}" "${SWAY_CONFIG}"
+    else
+        sed -i '/__WINDOW_RULES__/d' "${SWAY_CONFIG}"
+    fi
 }
 
 # Ask sway which display its Xwayland ended up on. The number is not fixed: it
@@ -440,8 +455,9 @@ reserve_foreign_x_displays() {
     # Stale sockets from a previous run in the same container would look like our
     # own listeners; the display numbers below are recomputed from scratch.
     rm -f "${dir}"/X[0-9]* 2>/dev/null || true
-    for n in $(grep -aoE '@/tmp/\.X11-unix/X[0-9]+' /proc/net/unix 2>/dev/null \
-            | sed 's/.*X//' | sort -un); do
+    grep -aoE '@/tmp/\.X11-unix/X[0-9]+' /proc/net/unix 2>/dev/null \
+        | sed 's/.*X//' | sort -un | while read -r n; do
+        [ -n "${n}" ] || continue
         : > "${dir}/X${n}" 2>/dev/null || true
         log "X: :${n} is answered by another container on the shared network namespace; reserved it"
     done
@@ -478,17 +494,25 @@ else
     # Headless fallback: Hermes captures sway's own output directly, so ensure
     # one exists and carries the requested mode.
     local out
-    out="$(swaymsg -t get_outputs 2>/dev/null \
-        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-        | sed -E 's/.*"([^"]+)"$/\1/')"
+    if command -v jq >/dev/null 2>&1; then
+        out="$(swaymsg -t get_outputs 2>/dev/null | jq -r '.[0].name // empty')"
+    else
+        out="$(swaymsg -t get_outputs 2>/dev/null \
+            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+            | sed -E 's/.*"([^"]+)"$/\1/')"
+    fi
     if [ -z "${out}" ]; then
         # Some wlroots builds start the headless backend with zero outputs;
         # create one explicitly so there is a surface to capture.
         swaymsg create_output >/dev/null 2>&1 || true
         sleep 0.3
-        out="$(swaymsg -t get_outputs 2>/dev/null \
-            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-            | sed -E 's/.*"([^"]+)"$/\1/')"
+        if command -v jq >/dev/null 2>&1; then
+            out="$(swaymsg -t get_outputs 2>/dev/null | jq -r '.[0].name // empty')"
+        else
+            out="$(swaymsg -t get_outputs 2>/dev/null \
+                | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+                | sed -E 's/.*"([^"]+)"$/\1/')"
+        fi
     fi
     if [ -n "${out}" ]; then
         log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
@@ -613,7 +637,9 @@ start_compositor() {
         restarts=0
         while :; do
             sleep 5
-            [ "${ENABLE_XWAYLAND}" = "true" ] && chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
+            if [ "${ENABLE_XWAYLAND}" = "true" ]; then
+                chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
+            fi
             # allow_steam_x11 can lose the lazy Xwayland startup race on a busy
             # boot (it only waits ~9s). Retry the grant once per tick so a
             # stream-time "Unable to open a connection to X" never comes from a
@@ -623,6 +649,8 @@ start_compositor() {
             if [ "${ENABLE_XWAYLAND}" = "true" ] && [ -z "${X11_STEAM_GRANTED:-}" ] \
                 && DISPLAY="${DISPLAY:-:0}" xhost +SI:localuser:steam >/dev/null 2>&1; then
                 X11_STEAM_GRANTED=1
+                chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+                chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
                 log "X11: allowed local user steam to connect to ${DISPLAY:-:0} (late grant)"
             fi
             if ! pgrep -x sway >/dev/null 2>&1; then
@@ -636,6 +664,7 @@ start_compositor() {
             fi
         done
     ) &
+    PIDS+=("$!")
 }
 
 # --- audio (PipeWire) -------------------------------------------------------
@@ -796,24 +825,46 @@ grant_gpu_access() {
 prepare_steam() {
     command -v steam >/dev/null 2>&1 || return 0
     [ "${AUTOSTART_STEAM:-true}" = "true" ] || { log "AUTOSTART_STEAM=false; skipping Steam prep (streamed app shows the desktop)"; return 0; }
-    command -v gamescope >/dev/null 2>&1 || { warn "Steam present but gamescope missing; Steam app disabled"; return 0; }
+    if [ "${STEAM_GAMESCOPE:-false}" = "true" ] && ! command -v gamescope >/dev/null 2>&1; then
+        warn "STEAM_GAMESCOPE=true requested but gamescope not found; Steam may fail"
+    fi
     id steam >/dev/null 2>&1 || { warn "no 'steam' user; Steam app disabled"; return 0; }
     [ -n "${WAYLAND_DISPLAY:-}" ] || { warn "no Wayland session up; Steam app will not work"; return 0; }
 
     # Ensure the steam user can actually open the GPU render node.
     grant_gpu_access steam
 
-    # Grant access to /dev/uhid for virtual gamepad creation
-    [ -c /dev/uhid ] && chgrp input /dev/uhid && chmod 660 /dev/uhid
+    # Grant access to /dev/uhid and /dev/uinput for virtual gamepad creation
+    if [ -c /dev/uhid ]; then
+        chgrp input /dev/uhid 2>/dev/null || true
+        chmod 660 /dev/uhid 2>/dev/null || true
+    fi
+    if [ -c /dev/uinput ]; then
+        chgrp input /dev/uinput 2>/dev/null || true
+        chmod 660 /dev/uinput 2>/dev/null || true
+    fi
 
-    # Grant access to input devices whose GID doesn't match container's input group
+    # Grant access to input devices whose GID doesn't match container's input group.
+    # Cache user groups and check the container's dynamic input GID to avoid repeated usermod calls.
+    local user_groups input_gid dev gid gname
+    user_groups="$(id -G steam 2>/dev/null || true)"
+    input_gid="$(getent group input 2>/dev/null | cut -d: -f3 || true)"
     for dev in /dev/input/event* /dev/input/js*; do
         [ -c "${dev}" ] || continue
         gid="$(stat -c '%g' "${dev}" 2>/dev/null)" || continue
-        [ "${gid}" = "992" ] && continue
-        gname="$(getent group "${gid}" | cut -d: -f1 2>/dev/null)"
-        [ -z "${gname}" ] && gname="input-${gid}" && groupadd -g "${gid}" "${gname}" 2>/dev/null || true
-        usermod -aG "${gname}" steam 2>/dev/null && log "granted steam access to ${dev} (gid ${gid} via group ${gname})"
+        [ -n "${input_gid}" ] && [ "${gid}" = "${input_gid}" ] && continue
+        case " ${user_groups} " in
+            *" ${gid} "*) continue ;;
+        esac
+        gname="$(getent group "${gid}" | cut -d: -f1 2>/dev/null || true)"
+        if [ -z "${gname}" ]; then
+            gname="input-${gid}"
+            groupadd -g "${gid}" "${gname}" 2>/dev/null || true
+        fi
+        if usermod -aG "${gname}" steam 2>/dev/null; then
+            user_groups="${user_groups} ${gid}"
+            log "granted steam access to ${dev} (gid ${gid} via group ${gname})"
+        fi
     done
 
     local uid runtime sockpath
@@ -827,6 +878,9 @@ prepare_steam() {
     sockpath="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
     chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
     chmod o+rw "${sockpath}" 2>/dev/null || true
+    ln -sf "${sockpath}" "${runtime}/${WAYLAND_DISPLAY##*/}" 2>/dev/null || true
+    ln -sf "${sockpath}" "${runtime}/wayland-0" 2>/dev/null || true
+    chown -h steam:steam "${runtime}"/wayland-* 2>/dev/null || true
 
     # Pin the gamescope window to the output Hermes actually captures and
     # fullscreen it there. On the KMS path sway runs a drm,headless multi-backend
@@ -862,10 +916,14 @@ ensure_conf_key() {
 }
 
 set_conf_key() {
-    local key="$1" val="$2"
-    if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "${HERMES_CONFIG}" 2>/dev/null; then
-        sed -i -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*.*/${key} = ${val}/" "${HERMES_CONFIG}"
-        log "config: updated ${key} = ${val}"
+    local key="$1" val="$2" current
+    current="$(sed -n -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*)/\1/p" "${HERMES_CONFIG}" 2>/dev/null | head -n1)"
+    current="$(printf '%s' "${current}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -n "${current}" ]; then
+        if [ "${current}" != "${val}" ]; then
+            sed -i -E "s/^[[:space:]]*${key}[[:space:]]*=.*/${key} = ${val}/" "${HERMES_CONFIG}"
+            log "config: updated ${key} = ${val}"
+        fi
     else
         printf '%s = %s\n' "${key}" "${val}" >> "${HERMES_CONFIG}"
         log "config: added ${key} = ${val}"
@@ -880,9 +938,11 @@ seed_config() {
     # start, but this flat path is ours, so rename it here or the container
     # would come up on an empty config and lose the user's settings.
     if [ -f "${LEGACY_HERMES_CONFIG}" ] && [ ! -f "${HERMES_CONFIG}" ]; then
-        mv "${LEGACY_HERMES_CONFIG}" "${HERMES_CONFIG}" \
-            && log "migrated ${LEGACY_HERMES_CONFIG} -> ${HERMES_CONFIG}" \
-            || warn "could not migrate ${LEGACY_HERMES_CONFIG}"
+        if mv "${LEGACY_HERMES_CONFIG}" "${HERMES_CONFIG}"; then
+            log "migrated ${LEGACY_HERMES_CONFIG} -> ${HERMES_CONFIG}"
+        else
+            warn "could not migrate ${LEGACY_HERMES_CONFIG}"
+        fi
     fi
     # Same story for the app list: hermes migrates the structured dir on its
     # own first start, but our sanitize/steam-registration below runs before
@@ -1031,7 +1091,6 @@ drop_desktop_app() {
 # the app when it is missing. Only touches the file when steam + gamescope exist.
 configure_steam_app() {
     command -v steam >/dev/null 2>&1 || return 0
-    command -v gamescope >/dev/null 2>&1 || return 0
     [ -f "${APPS_JSON}" ] || return 0
     command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot register the Steam app"; return 0; }
     # Already wired to the launcher? nothing to do.
@@ -1045,6 +1104,7 @@ configure_steam_app() {
           else .apps += [{
               "name": "Steam Big Picture",
               "image-path": "steam.png",
+              "virtual-display": true,
               "allow-client-commands": false,
               "cmd": $cmd
           }]
@@ -1060,7 +1120,9 @@ configure_steam_app() {
 
 # --- bring up the session ---------------------------------------------------
 start_dbus
-[ "${START_AVAHI}" = "true" ] && start_avahi || true
+if [ "${START_AVAHI}" = "true" ]; then
+    start_avahi || true
+fi
 if [ "${START_COMPOSITOR}" = "true" ]; then
     detect_devices
     log_kms_params
@@ -1076,7 +1138,7 @@ fi
 
 # --- hardware encode diagnostics (non-fatal) --------------------------------
 if [ -d /dev/dri ]; then
-    log "GPU nodes: $(ls /dev/dri 2>/dev/null | tr '\n' ' ')"
+    log "GPU nodes: $(find /dev/dri -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)"
     # vainfo often reports nothing useful as root even when encoding works
     # (Hermes probes h264/hevc/av1_vaapi itself when a stream starts), so this is
     # a note, not a warning: crying wolf here sent us chasing a non-issue.

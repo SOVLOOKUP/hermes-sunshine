@@ -19,6 +19,17 @@
 #    - Re-enables HEADLESS-1 at (0,0) to hold the compositor
 set -euo pipefail
 
+# Ensure single instance across sway config reloads
+PIDFILE="/run/hermes/hermes-focus-watch.pid"
+if [ -f "${PIDFILE}" ]; then
+    old_pid="$(cat "${PIDFILE}" 2>/dev/null || true)"
+    if [ -n "${old_pid}" ] && [ "${old_pid}" != "$$" ] && kill -0 "${old_pid}" 2>/dev/null; then
+        kill "${old_pid}" 2>/dev/null || true
+    fi
+fi
+mkdir -p /run/hermes 2>/dev/null || true
+echo "$$" > "${PIDFILE}" 2>/dev/null || true
+
 has_virtual1() {
     swaymsg -t get_outputs 2>/dev/null | jq -e '.[] | select(.name=="Virtual-1" and .active==true)' >/dev/null 2>&1
 }
@@ -45,7 +56,7 @@ process_event() {
         if [ "${CURRENT_STATE}" != "idle" ]; then
             # Virtual-1 is absent/disconnected: revive HEADLESS-1 to prevent sway from idling with 0 outputs
             if ! has_headless; then
-                swaymsg 'output "HEADLESS-1" enable position 0 0 resolution 1280x720' >/dev/null 2>&1 || true
+                swaymsg 'output "HEADLESS-1" enable; output "HEADLESS-1" position 0 0; output "HEADLESS-1" resolution 1280x720' >/dev/null 2>&1 || true
                 swaymsg 'workspace 1' >/dev/null 2>&1 || true
             fi
             CURRENT_STATE="idle"
@@ -53,7 +64,13 @@ process_event() {
     fi
 }
 
-process_event
-swaymsg -t subscribe -m '["output","workspace"]' 2>/dev/null | while read -r _; do
+while :; do
+    CURRENT_STATE="unknown"
     process_event
+    if command -v swaymsg >/dev/null 2>&1; then
+        swaymsg -t subscribe -m '["output","workspace"]' 2>/dev/null | while read -r _; do
+            process_event
+        done || true
+    fi
+    sleep 2
 done

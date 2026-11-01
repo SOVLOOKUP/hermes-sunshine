@@ -8,8 +8,8 @@
 # SET_OUTPUT) while every capture ioctl dies — the stream then fails with
 # "Failed to initialize video capture/encoding". Two past failures combined
 # here:
-#   * a bare `git clone` installs the main branch (0.4.x-dev, UAPI 13), not the
-#     release tag the container needs (UAPI 9);
+#   * a bare `git clone` installs the main branch (0.4.x-dev), not the
+#     release tag the container needs (Hermes 0.6.0 needs v0.4.0 / UAPI 14);
 #   * `dkms status`/`modinfo` describe files on disk — the kernel may still be
 #     running a stale instance, so nothing but querying the live driver counts
 #     as proof.
@@ -29,18 +29,18 @@
 #   6. start the container again.
 #
 # Usage:
-#   sudo ./build-hermes-kms.sh                 # install v0.3.2 (UAPI 9; pairs with Hermes 0.5.x)
-#   sudo ./build-hermes-kms.sh v0.3.2          # explicit tag
+#   sudo ./build-hermes-kms.sh                 # install v0.4.0 (UAPI 14; pairs with Hermes 0.6.0)
+#   sudo ./build-hermes-kms.sh v0.4.0          # explicit tag
 #   sudo ./build-hermes-kms.sh verify          # only re-check the RUNNING module
 #
 # Environment overrides:
 #   CONTAINER_NAME=sunshine      container to stop/start around the module swap
 #   INITIAL_ENABLED=1            module param at modprobe time (see repo README)
-#   EXPECTED_UAPI=9              skip auto-derivation and pin the expectation
+#   EXPECTED_UAPI=14             skip auto-derivation and pin the expectation
 #   WORKDIR=/tmp/hermes-kms-build
 set -euo pipefail
 
-TAG="${1:-v0.3.2}"
+TAG="${1:-v0.4.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-sunshine}"
 INITIAL_ENABLED="${INITIAL_ENABLED:-0}"
 EXPECTED_UAPI="${EXPECTED_UAPI:-}"
@@ -81,7 +81,7 @@ verify_running() {
 }
 
 if [ "$TAG" = "verify" ]; then
-    TAG="${HERMES_KMS_TAG:-v0.3.2}"
+    TAG="${HERMES_KMS_TAG:-v0.4.0}"
     verify_running
     exit 0
 fi
@@ -233,9 +233,11 @@ modprobe hermes_kms "initial_enabled=$INITIAL_ENABLED"
 log "module reloaded"
 
 # --- 5. verification gate: query the LIVE driver ------------------------------
-log "building static hermes-kmsctl for verification"
+log "building hermes-kmsctl for verification"
 gcc -static -O2 -I"$SRCDIR/include/uapi" \
-    "$SRCDIR/tools/hermes-kmsctl/hermes_kmsctl.c" -o "$WORKDIR/kmsctl"
+    "$SRCDIR/tools/hermes-kmsctl/hermes_kmsctl.c" -o "$WORKDIR/kmsctl" 2>/dev/null \
+    || gcc -O2 -I"$SRCDIR/include/uapi" \
+        "$SRCDIR/tools/hermes-kmsctl/hermes_kmsctl.c" -o "$WORKDIR/kmsctl"
 
 out="$( "$WORKDIR/kmsctl" version --verbose )" || die "kmsctl cannot reach the driver — module load failed? (dmesg | grep hermes)"
 printf '%s\n' "$out"

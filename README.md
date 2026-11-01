@@ -93,7 +93,7 @@ cannot be loaded from a container):
 # drm/drm_dumb_buffers.h), builds via DKMS, swaps the loaded module (stopping
 # the container first) and verifies the LIVE driver version + UAPI with a
 # static hermes-kmsctl:
-sudo ./host-module/build-hermes-kms.sh            # installs v0.3.2 (UAPI 9)
+sudo ./host-module/build-hermes-kms.sh            # installs v0.4.0 (UAPI 14)
 sudo ./host-module/build-hermes-kms.sh verify    # re-check the running module any time
 
 # Manual equivalent — IMPORTANT: pin the tag. Each Hermes release speaks one
@@ -101,7 +101,7 @@ sudo ./host-module/build-hermes-kms.sh verify    # re-check the running module a
 # 13/14 (Hermes-KMS 0.4.0). A mismatching module loads fine but capture ioctls
 # fail or degrade, and sessions die with "Failed to initialize video capture/
 # encoding" / "no active scanout geometry yet" in the container log.
-git clone --branch v0.3.2 --depth 1 https://github.com/MrOz59/Hermes-KMS
+git clone --branch v0.4.0 --depth 1 https://github.com/MrOz59/Hermes-KMS
 cd Hermes-KMS
 sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/hermes_kms.ko
 
@@ -510,7 +510,8 @@ when host networking is unavailable.
 - `--device /dev/dri` — exposes both the host **Hermes-KMS virtual card** (which
   sway drives) and the **real GPU render node** (rendering + VAAPI/NVENC encode).
 - `--device /dev/uinput` — virtual gamepad/keyboard/mouse injection.
-- `--cap-add SYS_ADMIN` — required for KMS/DRM capture and `uinput`.
+- `--device /dev/uhid` — virtual gamepad creation (e.g. DualSense emulation via HID). Load on the host with `sudo modprobe uhid` (or `/etc/modules-load.d/uhid.conf`).
+- `--cap-add SYS_ADMIN` — required for KMS/DRM capture, `uinput` and `uhid`.
 - `-v ./config:/config` — persists the config, paired clients, and app list.
 
 ## Encoding backends

@@ -127,5 +127,5 @@ services:
     #   context: .
     #   dockerfile: Dockerfile
     #   args:
-    #     HERMES_REF: latest       # or a specific tag, e.g. v0.4.0
+    #     HERMES_REF: latest       # or a specific tag, e.g. v0.6.0
     #     USE_CN_MIRROR: "true"    # fast USTC/Tsinghua mirrors (set false abroad)

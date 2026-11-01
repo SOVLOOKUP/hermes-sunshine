@@ -20,7 +20,9 @@ set -euo pipefail
 STEAM_LOG=/var/log/steam.log
 if [ -f "${STEAM_LOG}" ]; then
     log_size="$(wc -c <"${STEAM_LOG}" 2>/dev/null || echo 0)"
-    [ "${log_size}" -gt 5242880 ] && mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
+    if [ "${log_size}" -gt 5242880 ]; then
+        mv -f "${STEAM_LOG}" "${STEAM_LOG}.1" 2>/dev/null || true
+    fi
 fi
 exec >>"${STEAM_LOG}" 2>&1
 
@@ -46,6 +48,9 @@ sockpath="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 install -d -o steam -g steam -m 700 "${runtime}" 2>/dev/null || true
 chmod o+x "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 chmod o+rw "${sockpath}" 2>/dev/null || true
+ln -sf "${sockpath}" "${runtime}/${WAYLAND_DISPLAY##*/}" 2>/dev/null || true
+ln -sf "${sockpath}" "${runtime}/wayland-0" 2>/dev/null || true
+chown -h steam:steam "${runtime}"/wayland-* 2>/dev/null || true
 
 TZ_ENV=()
 [ -n "${TZ:-}" ] && TZ_ENV=(TZ="${TZ}")
@@ -97,7 +102,7 @@ STEAM_GAMESCOPE="${STEAM_GAMESCOPE:-false}"
 # compositor's own environment, which has the right DISPLAY.
 sway_x_display() {
     [ -n "${SWAYSOCK:-}" ] && command -v swaymsg >/dev/null 2>&1 || return 1
-    out="/tmp/.hermes-xdisplay.$$"
+    local out="/tmp/.hermes-xdisplay.$$" _
     rm -f "${out}"
     swaymsg -q exec "printf %s \"\$DISPLAY\" > ${out}" >/dev/null 2>&1 || return 1
     for _ in $(seq 1 20); do
@@ -146,15 +151,34 @@ chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
 
 # Xwayland runs without -auth, so it only accepts its own uid (root); grant the
-# steam user explicitly. Harmless if the entrypoint already did it.
+# steam user explicitly. Under lazy Xwayland, the first connection (here xhost)
+# actually triggers Xwayland to start. Loop with retry so we wait for Xwayland
+# to become ready and grant steam access before steam itself tries to connect.
 if [ "${STEAM_GAMESCOPE}" != "true" ] && command -v xhost >/dev/null 2>&1; then
-    DISPLAY="${XENV[0]#DISPLAY=}" xhost +SI:localuser:steam >/dev/null 2>&1 || true
+    xdisp_target="${XENV[0]#DISPLAY=}"
+    xhost_ok="false"
+    for _ in $(seq 1 30); do
+        if DISPLAY="${xdisp_target}" xhost +SI:localuser:steam >/dev/null 2>&1; then
+            xhost_ok="true"
+            break
+        fi
+        sleep 0.15
+    done
+    if [ "${xhost_ok}" = "true" ]; then
+        log "X11: allowed local user steam to connect to ${xdisp_target}"
+    else
+        warn "could not grant steam access to X display ${xdisp_target} in session launcher"
+    fi
+    # Re-apply 0666 because Xwayland creates its socket on startup with 0755 umask
+    chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+    chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
 fi
 
+# shellcheck disable=SC2016
 exec runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
-    WAYLAND_DISPLAY="${sockpath}" \
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY##*/}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     RADV_PERFTEST="${RADV_PERFTEST:-gpl}" \
     mesa_glthread="${mesa_glthread:-true}" \
