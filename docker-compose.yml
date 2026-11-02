@@ -92,8 +92,12 @@ services:
     # environment:
     #   TZ: Asia/Shanghai        # set your timezone (required for correct Steam time)
     #   HERMES_KMS: auto         # virtual display: auto | on | off
+    #   HERMES_KMS_CARD: auto    # KMS card: auto | /dev/dri/card1 | /dev/dri/card2 (pin card for multi-session)
     #   RENDER_NODE: auto        # GPU render node: auto | /dev/dri/renderD128 | /dev/dri/renderD129 (choose discrete GPU)
+    #   SUNSHINE_NAME: "Hermes"  # server name displayed in Moonlight / Artemis / Hestia
+    #   PORT: "47989"            # base port (default 47989, web UI at PORT+1 = 47990)
     #   ADDRESS_FAMILY: both     # both | ipv4 | ipv6 (set to ipv4 if host has IPv6/dual-stack port collision)
+    #   ENABLE_HDR: auto         # auto (follow kernel module) | true (force HDR) | false (force SDR, fixes SDR client capture abort)
     #   IGNORE_ENCODER_PROBE_FAILURE: disabled # enabled | disabled (bypass synthetic capture check on unusual headless setups)
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"

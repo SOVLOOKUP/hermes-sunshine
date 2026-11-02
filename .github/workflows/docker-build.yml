@@ -7,7 +7,7 @@ name: Build & publish Docker image
 # Besides the usual push/PR CI, a daily schedule follows upstream Hermes
 # releases (https://github.com/MrOz59/Hermes): it resolves the latest release
 # tag and, if no image has been published for it yet, builds + pushes one tagged
-# `hermes-<tag>` and updates `latest` to both GHCR and Docker Hub.
+# `<tag>` and updates `latest` to both GHCR and Docker Hub.
 # Trigger a specific build by hand from the Actions tab (workflow_dispatch)
 # with an optional tag / force flag.
 
@@ -83,7 +83,7 @@ jobs:
           # published yet (unless forced).
           should_build=true
           if [ "${{ github.event_name }}" = "schedule" ] && [ "${FORCE:-false}" != "true" ]; then
-            image="${REGISTRY}/${IMAGE_NAME,,}:hermes-${ref}"
+            image="${REGISTRY}/${IMAGE_NAME,,}:${ref}"
             if docker manifest inspect "${image}" >/dev/null 2>&1; then
               echo "::notice::${image} already published — nothing to do."
               should_build=false
@@ -150,7 +150,7 @@ jobs:
         with:
           images: ${{ steps.registries.outputs.images }}
           tags: |
-            type=raw,value=hermes-${{ needs.resolve.outputs.hermes_ref }}
+            type=raw,value=${{ needs.resolve.outputs.hermes_ref }}
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
@@ -166,7 +166,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Outside China: use the default global CDN, not the CN mirrors. Pin
           # the exact Hermes release resolved above so the image content matches
-          # its `hermes-<tag>` tag (no drift if upstream releases mid-build).
+          # its `<tag>` tag (no drift if upstream releases mid-build).
           build-args: |
             USE_CN_MIRROR=false
             HERMES_REF=${{ needs.resolve.outputs.hermes_ref }}

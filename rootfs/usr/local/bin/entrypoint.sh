@@ -80,8 +80,8 @@ start_avahi() {
 }
 
 # --- device detection: Hermes-KMS virtual display + real render GPU ---------
-HERMES_KMS_CARD=""   # DRM card node backed by the host hermes_kms.ko module
-RENDER_NODE=""       # real GPU render node used for rendering + encoding
+HERMES_KMS_CARD="${HERMES_KMS_CARD:-}" # DRM card node backed by the host hermes_kms.ko module (override via env)
+RENDER_NODE="${RENDER_NODE:-}"         # real GPU render node used for rendering + encoding (override via env)
 KMS_ZEROCOPY="false" # true once sway is actually up on the Hermes-KMS DRM card
 
 drm_driver() {
@@ -110,8 +110,24 @@ is_hermes_kms() {
 
 detect_devices() {
     local node drv
-    # The virtual display card is the DRM card driven by the host hermes_kms.ko
-    # module (loaded with initial_enabled=1 and exposed via /dev/dri).
+
+    # Virtual display card backed by host hermes_kms:
+    # 1. Respect user override from environment (e.g. HERMES_KMS_CARD=/dev/dri/card2 or card2 or 2)
+    if [ -n "${HERMES_KMS_CARD:-}" ]; then
+        case "${HERMES_KMS_CARD}" in
+            /dev/dri/card*) ;;
+            card*) HERMES_KMS_CARD="/dev/dri/${HERMES_KMS_CARD}" ;;
+            [0-9]*) HERMES_KMS_CARD="/dev/dri/card${HERMES_KMS_CARD}" ;;
+        esac
+        if [ -e "${HERMES_KMS_CARD}" ]; then
+            log "using user-specified Hermes-KMS card: ${HERMES_KMS_CARD}"
+        else
+            warn "specified Hermes-KMS card ${HERMES_KMS_CARD} does not exist, falling back to auto-detection"
+            HERMES_KMS_CARD=""
+        fi
+    fi
+
+    # 2. Auto-detect: first card* whose driver is hermes_kms
     for node in /dev/dri/card[0-9]*; do
         [ -e "${node}" ] || continue
         drv="$(drm_driver "${node}")"
@@ -417,6 +433,8 @@ write_sway_config() {
     [ "${ENABLE_XWAYLAND}" = "true" ] && xw="xwayland enable"
     if [ "${hdr_on}" = "true" ]; then
         hdr='output "Virtual-1" hdr on'
+    else
+        hdr='output "Virtual-1" hdr off'
     fi
     # New windows must land on the output Hermes captures. With the
     # drm,headless multi-backend the idle placeholder output still exists, and a
@@ -575,9 +593,23 @@ start_compositor() {
     # and sway >= 1.12 sets BT2020/PQ on top of that. Keep the directive out of
     # the config otherwise, so an SDR module is never asked for HDR.
     local hdr_on="false"
-    if [ "${use_kms}" = "true" ] && [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
-        hdr_on="true"
+    case "${ENABLE_HDR:-auto}" in
+        true|1|yes)
+            hdr_on="true"
+            ;;
+        false|0|no)
+            hdr_on="false"
+            ;;
+        *)
+            if [ "${use_kms}" = "true" ] && [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+                hdr_on="true"
+            fi
+            ;;
+    esac
+    if [ "${hdr_on}" = "true" ]; then
         log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
+    else
+        log "HDR: disabled (ENABLE_HDR=${ENABLE_HDR:-auto})"
     fi
     write_sway_config "${hdr_on}"
 
@@ -1012,6 +1044,15 @@ seed_config() {
     if [ "${IGNORE_ENCODER_PROBE_FAILURE:-disabled}" = "enabled" ] || [ "${IGNORE_ENCODER_PROBE_FAILURE:-false}" = "true" ]; then
         set_conf_key ignore_encoder_probe_failure enabled
     fi
+    if [ -n "${SUNSHINE_NAME:-${SERVER_NAME:-}}" ]; then
+        set_conf_key sunshine_name "${SUNSHINE_NAME:-${SERVER_NAME}}"
+    fi
+    if [ -n "${PORT:-}" ]; then
+        set_conf_key port "${PORT}"
+    fi
+    if [ -n "${OUTPUT_NAME:-}" ]; then
+        set_conf_key output_name "${OUTPUT_NAME}"
+    fi
     # Audio: let Hermes fully own its loopback sinks. It creates
     # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
     # stream's channel layout as the PipeWire default (so Steam/games play into
@@ -1145,19 +1186,25 @@ configure_steam_app() {
     local cover="steam-big-picture.png"
     local vdisp="false"
     [ "${KMS_ZEROCOPY}" = "true" ] && vdisp="true"
-    # Already wired to the launcher and matching vdisp?
+    # Already wired to the launcher, matching vdisp, and has hdr-match prep-cmd?
     jq -e --arg cmd "${STEAM_SESSION_CMD}" --argjson vd "${vdisp}" \
-        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd and .["virtual-display"] == $vd)' \
+        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd and .["virtual-display"] == $vd and (.["prep-cmd"] // [] | any(.do == "/usr/local/bin/hermes-hdr-match")))' \
         "${APPS_JSON}" >/dev/null 2>&1 && return 0
     local tmp; tmp="$(mktemp)"
     if jq --arg cmd "${STEAM_SESSION_CMD}" --arg img "${cover}" --argjson vd "${vdisp}" '
+          def ensure_hdr_prep:
+            .["prep-cmd"] = (
+              [(.["prep-cmd"] // [])[] | select(.do | test("hermes-hdr-match") | not)] +
+              [{"do": "/usr/local/bin/hermes-hdr-match", "undo": ""}]
+            );
           if any(.apps[]?; .name == "Steam Big Picture")
-          then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd | .["virtual-display"] = $vd | .["image-path"] = $img else . end)
+          then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd | .["virtual-display"] = $vd | .["image-path"] = $img | ensure_hdr_prep else . end)
           else .apps += [{
               "name": "Steam Big Picture",
               "image-path": $img,
               "virtual-display": $vd,
               "allow-client-commands": false,
+              "prep-cmd": [{"do": "/usr/local/bin/hermes-hdr-match", "undo": ""}],
               "cmd": $cmd
           }]
           end
@@ -1242,6 +1289,7 @@ configure_steam_app
 ensure_clipboard_wrappers
 check_stream_ports
 log "launching hermes with config: ${HERMES_CONFIG}"
-log "web UI will be available at https://<host>:47990"
+web_port=$(( ${PORT:-47989} + 1 ))
+log "web UI will be available at https://<host>:${web_port}"
 cd /config
 exec /usr/bin/hermes "${HERMES_CONFIG}" "$@"

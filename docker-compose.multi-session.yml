@@ -1,0 +1,144 @@
+# ==============================================================================
+# Hermes-Sunshine — Multi-Session / Multi-Client Docker Compose Example
+# ==============================================================================
+# This file runs multiple concurrent streaming instances (one container per client).
+#
+# Prerequisites on the HOST:
+#   1. Load Hermes-KMS kernel module with multiple DRM devices:
+#        sudo modprobe hermes_kms initial_enabled=0 devices=2
+#      Or via the builder script:
+#        DEVICES=2 sudo ./host-module/build-hermes-kms.sh
+#      Verify cards:
+#        ls -l /dev/dri/card*  # should see e.g. card0 (GPU), card1 (KMS 1), card2 (KMS 2)
+#
+#   2. Networking:
+#      Mode A (Recommended): Macvlan network (configured below). Each container gets
+#      its own dedicated LAN IP, allowing simultaneous Moonlight autodiscovery,
+#      zero port conflicts, and native low-latency UDP.
+#      Adjust `parent: eth0` and the subnet / IPs to match your router.
+#
+#      Mode B: Bridge network with port offsets (comment out macvlan networks and
+#      use the ports mapping section).
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # Seat 1 / Client 1
+  # ----------------------------------------------------------------------------
+  sunshine-1:
+    image: ghcr.io/sovlookup/hermes-sunshine:latest
+    container_name: sunshine-1
+    restart: unless-stopped
+    init: true
+    ipc: host
+
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
+
+    device_cgroup_rules:
+      - 'c 226:* rmw' # DRM (GPU + Hermes-KMS cards)
+      - 'c 13:* rmw'  # input (virtual gamepad evdev)
+      - 'c 10:* rmw'  # misc (uinput + uhid)
+
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/uinput:/dev/uinput
+      - /dev/uhid:/dev/uhid
+
+    volumes:
+      - ./config/seat1:/config
+      - /dev/input:/dev/input
+
+    environment:
+      TZ: Asia/Shanghai
+      HERMES_KMS: auto
+      HERMES_KMS_CARD: /dev/dri/card1    # Dedicated virtual display card 1
+      RENDER_NODE: auto                  # Real GPU render node (shared across sessions)
+      SUNSHINE_NAME: "Hermes Seat 1"     # Shown in Moonlight / Hestia
+      PORT: "47989"                      # Web UI at 47990
+      AUTOSTART_STEAM: "true"
+
+    # --- Mode A: Macvlan (uncomment if using macvlan below) ---
+    networks:
+      streaming_lan:
+        ipv4_address: 192.168.1.201
+
+    # --- Mode B: Bridge / Port offset (if NOT using macvlan) ---
+    # ports:
+    #   - "47984-47990:47984-47990/tcp"
+    #   - "48010:48010/tcp"
+    #   - "47998-48000:47998-48000/udp"
+
+  # ----------------------------------------------------------------------------
+  # Seat 2 / Client 2
+  # ----------------------------------------------------------------------------
+  sunshine-2:
+    image: ghcr.io/sovlookup/hermes-sunshine:latest
+    container_name: sunshine-2
+    restart: unless-stopped
+    init: true
+    ipc: host
+
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+      - apparmor=unconfined
+
+    device_cgroup_rules:
+      - 'c 226:* rmw' # DRM (GPU + Hermes-KMS cards)
+      - 'c 13:* rmw'  # input (virtual gamepad evdev)
+      - 'c 10:* rmw'  # misc (uinput + uhid)
+
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/uinput:/dev/uinput
+      - /dev/uhid:/dev/uhid
+
+    volumes:
+      - ./config/seat2:/config
+      - /dev/input:/dev/input
+
+    environment:
+      TZ: Asia/Shanghai
+      HERMES_KMS: auto
+      HERMES_KMS_CARD: /dev/dri/card2    # Dedicated virtual display card 2
+      RENDER_NODE: auto                  # Real GPU render node (shared across sessions)
+      SUNSHINE_NAME: "Hermes Seat 2"     # Shown in Moonlight / Hestia
+      PORT: "47989"                      # Web UI at 47990 (independent IP via macvlan)
+      AUTOSTART_STEAM: "true"
+
+    # --- Mode A: Macvlan (uncomment if using macvlan below) ---
+    networks:
+      streaming_lan:
+        ipv4_address: 192.168.1.202
+
+    # --- Mode B: Bridge / Port offset (if NOT using macvlan) ---
+    # environment overrides for Mode B:
+    #   PORT: "48989"                    # Shifts base port; Web UI at 48990
+    # ports:
+    #   - "48984-48990:48984-48990/tcp"
+    #   - "49010:49010/tcp"
+    #   - "48998-49000:48998-49000/udp"
+
+# ==============================================================================
+# Macvlan Network definition (Mode A)
+# Replace `parent: eth0` with your host physical interface name (e.g. eno1, enp3s0).
+# Replace subnet and gateway with your local network settings.
+# ==============================================================================
+networks:
+  streaming_lan:
+    driver: macvlan
+    driver_opts:
+      parent: eth0
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1

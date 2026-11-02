@@ -39,7 +39,7 @@ They aim at different trade-offs:
 | Client resolution | Rendered at the client's **negotiated native** res per session — no upscaling, no dummy plug   | Adaptive per session                                         | Fixed virtual output; adaptive res needs xrandr overlays            |
 | Audio             | **PipeWire** virtual sink                                                                      | PulseAudio (embedded / sidecar)                              | PulseAudio                                                          |
 | Out of the box    | Boots into **Steam Big Picture** (console-like); desktop fallback                              | Generic app runner — pick/define apps (Steam image incl.)    | Full **Xfce desktop** + NoVNC browser access; launch Steam yourself |
-| Concurrency       | Single session                                                                                 | **Multiple** isolated sessions / users                       | Single session                                                      |
+| Concurrency       | Single session per container (**multi-session ready via multi-container**)    | **Multiple** isolated sessions / users                       | Single session                                                      |
 | Configuration     | Stock **Sunshine web UI** (pair by PIN)                                                        | TOML file + Wolf UI app                                      | Sunshine web UI + NoVNC                                             |
 | Orchestration     | One self-contained container                                                                   | Spawns per-app containers — needs **`/var/run/docker.sock`** | One container                                                       |
 | Main dependency   | **Host kernel module** (Hermes-KMS) for the low-latency path; auto software fallback otherwise | No kernel module                                             | No kernel module                                                    |
@@ -64,6 +64,7 @@ from a browser (NoVNC) and don't mind X11's resolution quirks.
 ```
 Dockerfile                                single-stage build (download + install pkg)
 docker-compose.yml                        ready-to-run service definition
+docker-compose.multi-session.yml          ready-to-run multi-session / multi-seat definition
 scripts/patch-clipboard-leak.sh           one-shot hotfix script for clipboard FD leak & port 47999 release
 host-module/build-hermes-kms.sh           host kernel module builder, DKMS installer & live UAPI verifier
 rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch + multi-GPU discovery
@@ -394,11 +395,11 @@ builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`) and *
 ```bash
 # Pull from GHCR
 docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
-docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.7.0   # pinned to a Hermes release
+docker pull ghcr.io/sovlookup/hermes-sunshine:v0.7.0          # pinned to a Hermes release
 
 # Pull from Docker Hub
 docker pull gonorth/hermes-sunshine:latest                    # newest build
-docker pull gonorth/hermes-sunshine:hermes-v0.7.0             # pinned to a Hermes release
+docker pull gonorth/hermes-sunshine:v0.7.0                    # pinned to a Hermes release
 
 # China: use the Nanjing University GHCR mirror for a faster pull
 docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
@@ -406,7 +407,7 @@ docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
 
 > **Note on Docker Hub push**: GHCR push uses the automatic `GITHUB_TOKEN`. To enable Docker Hub push from the GitHub Actions workflow, add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub Personal Access Token with Read & Write access) to your repository's GitHub Secrets. If the secrets are omitted, the workflow will log a notice and push to GHCR only without failing.
 
-Each build publishes a single image (tags `latest` and `hermes-<tag>`) that boots
+Each build publishes a single image (tags `latest` and `<tag>`) that boots
 straight into **Steam Big Picture** (see below).
 
 It runs on three triggers:
@@ -414,14 +415,14 @@ It runs on three triggers:
 - **push / pull request** — normal CI for changes to this repo.
 - **daily schedule** — follows upstream [Hermes](https://github.com/MrOz59/Hermes)
   releases: it resolves the latest release tag and, only if no image has been
-  published for it yet, builds one tagged `hermes-<tag>` and refreshes `latest`.
+  published for it yet, builds one tagged `<tag>` and refreshes `latest`.
   So a new Hermes release is picked up automatically within a day, and unchanged
   days are skipped (no needless rebuilds).
 - **manual** (`workflow_dispatch`) — build a specific `hermes_ref` on demand, with
   a `force` toggle to rebuild even when the tag already exists.
 
 Each build pins the resolved `HERMES_REF`, so the image content always matches
-its `hermes-<tag>` tag. Runners are outside China, so the workflow passes
+its `<tag>` tag. Runners are outside China, so the workflow passes
 `USE_CN_MIRROR=false` automatically.
 
 ## Steam Big Picture
@@ -535,7 +536,10 @@ denied`.
 | ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TZ`                           | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                 |
 | `HERMES_KMS`                   | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                         |
+| `HERMES_KMS_CARD`              | `auto`                  | Dedicated Hermes-KMS card node (e.g. `/dev/dri/card1` or `card2`). Essential for multi-session / multi-seat setups.                                                             |
 | `RENDER_NODE`                  | `auto`                  | Dedicated GPU render/encode node (e.g. `/dev/dri/renderD128` or `128`). Automatically updates Hermes `adapter_name` and sets `WLR_RENDER_DRM_DEVICE`. Ideal for multi-GPU setups. |
+| `SUNSHINE_NAME`                | _(hostname)_            | Server name advertised in Moonlight / Artemis / Hestia. Defaults to container hostname.                                                                                        |
+| `PORT`                         | `47989`                 | Base port (default 47989, web UI at `PORT+1` = 47990). Automatically shifts streaming and control ports.                                                                       |
 | `ADDRESS_FAMILY`               | `both`                  | Network IP stack binding: `both`, `ipv4`, or `ipv6`. Use `ipv4` if host encounters IPv6 or dual-stack port binding conflicts.                                                 |
 | `IGNORE_ENCODER_PROBE_FAILURE` | `disabled`              | Set `enabled` (or `true`) to bypass synthetic capture and encoder probe checks on unusual or purely headless setups.                                                           |
 | `DRI_PRIME`                    | `1` (if multi-GPU)      | Controls DRI PRIME GPU offloading injected into the Steam Big Picture session.                                                                                                 |
@@ -602,6 +606,70 @@ when host networking is unavailable.
   `RENDER_NODE=/dev/dri/renderD128` (or `RENDER_NODE=128`) in `docker-compose.yml` to
   explicitly pin the high-performance GPU for sway composition and Hermes hardware
   encoding.
+
+## Multi-session / Concurrent streaming
+
+While a single container instance serves one client session at a time (running one Sway compositor and one Steam Big Picture instance), you can run **multiple concurrent streaming sessions** on the same host using a multi-container architecture.
+
+This provides full isolation:
+- **Zero process interference:** Each player gets an independent Sway Wayland compositor, isolated PipeWire audio stack, separate Steam user session, and independent virtual input devices (`uinput`/`uhid`).
+- **Shared hardware acceleration:** All instances share the physical GPU render node (`/dev/dri/renderD128`) for 3D rendering and hardware encoding (VAAPI/NVENC), each capturing its own virtual display scanout via zero-copy DMA-BUF.
+- **No Docker socket exposure:** Unlike architectures that require mounting `/var/run/docker.sock`, containers remain self-contained and isolated.
+
+### 1. Host kernel module: create multiple DRM cards
+
+The `hermes_kms` kernel module supports a `devices` parameter to spawn multiple independent DRM virtual cards.
+
+Load the module with the desired number of devices (e.g. 2 seats):
+```bash
+# Using the build script:
+DEVICES=2 sudo ./host-module/build-hermes-kms.sh
+
+# Or directly via modprobe:
+sudo modprobe hermes_kms initial_enabled=0 devices=2
+```
+
+To make this persistent across host reboots:
+```bash
+echo "options hermes_kms initial_enabled=0 devices=2" | sudo tee /etc/modprobe.d/hermes-kms.conf
+```
+
+Verify that the cards are available:
+```bash
+ls -l /dev/dri/card*
+# e.g.:
+# /dev/dri/card0 -> Real GPU
+# /dev/dri/card1 -> Hermes-KMS Virtual Display 1 (Seat 1)
+# /dev/dri/card2 -> Hermes-KMS Virtual Display 2 (Seat 2)
+```
+
+### 2. Launch with `docker-compose.multi-session.yml`
+
+A ready-to-run template is provided in `docker-compose.multi-session.yml`:
+
+```bash
+docker compose -f docker-compose.multi-session.yml up -d
+```
+
+#### Networking options:
+
+- **Mode A: Macvlan (Recommended)**
+  Each container gets its own IP on your LAN (`192.168.1.201` and `192.168.1.202`).
+  - Standard ports (`47989`, `47990`, `47998-48000`) on both containers.
+  - Moonlight mDNS autodiscovery works out of the box for both seats.
+  - Set `parent: eth0` to your host's network interface.
+
+- **Mode B: Bridge network with port offsets**
+  If Macvlan is not available (e.g. single-IP VPS or certain WiFi interfaces):
+  - Seat 1 uses base port `PORT: 47989` (Web UI at `47990`, UDP stream at `47998-48000`).
+  - Seat 2 uses base port `PORT: 48989` (Web UI at `48990`, UDP stream at `48998-49000`).
+  - Clients add Seat 2 manually in Moonlight by specifying `<host-ip>:48989`.
+
+### 3. Client configuration & pairing
+
+1. Pair Seat 1: Open `https://<ip-or-host>:47990`, enter the PIN from Moonlight client 1.
+2. Pair Seat 2: Open `https://<ip-or-host>:48990`, enter the PIN from Moonlight client 2.
+3. Both clients can stream simultaneously at their respective native resolutions and framerates.
 
 ## Notes & limitations
 

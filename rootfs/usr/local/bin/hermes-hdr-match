@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Match Sway Virtual-1 HDR mode to the client's requested dynamic range.
+# Invoked by Hermes as a prep-cmd before display capture initializes.
+set -euo pipefail
+
+hdr_req="${HERMES_CLIENT_HDR:-${SUNSHINE_CLIENT_HDR:-false}}"
+
+export SWAYSOCK="${SWAYSOCK:-/run/hermes/sway.sock}"
+[ -S "${SWAYSOCK}" ] || exit 0
+command -v swaymsg >/dev/null 2>&1 || exit 0
+
+case "${hdr_req}" in
+    1|true|TRUE|yes|YES)
+        # Client requested HDR: only turn on if kernel module supports it
+        if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+            swaymsg output Virtual-1 hdr on 2>/dev/null || true
+        fi
+        ;;
+    *)
+        # Client requested SDR: force Virtual-1 to SDR so Hermes KMS capture succeeds
+        swaymsg output Virtual-1 hdr off 2>/dev/null || true
+        ;;
+esac
+
+exit 0

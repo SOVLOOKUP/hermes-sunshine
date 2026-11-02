@@ -35,7 +35,9 @@
 #
 # Environment overrides:
 #   CONTAINER_NAME=sunshine      container to stop/start around the module swap
-#   INITIAL_ENABLED=1            module param at modprobe time (see repo README)
+#   INITIAL_ENABLED=0            module param at modprobe time (see repo README)
+#   DEVICES=1                    DRM cards to create (set 2+ for multi-session / multi-container)
+#   EXTRA_PARAMS=""              additional modprobe parameters (e.g. hdr_enable=1)
 #   EXPECTED_UAPI=14             skip auto-derivation and pin the expectation
 #   WORKDIR=/tmp/hermes-kms-build
 set -euo pipefail
@@ -43,6 +45,8 @@ set -euo pipefail
 TAG="${1:-v0.4.1}"
 CONTAINER_NAME="${CONTAINER_NAME:-sunshine}"
 INITIAL_ENABLED="${INITIAL_ENABLED:-0}"
+DEVICES="${DEVICES:-1}"
+EXTRA_PARAMS="${EXTRA_PARAMS:-}"
 EXPECTED_UAPI="${EXPECTED_UAPI:-}"
 WORKDIR="${WORKDIR:-/tmp/hermes-kms-build}"
 REPO=MrOz59/Hermes-KMS
@@ -298,7 +302,7 @@ if [ -d /sys/module/hermes_kms ] || grep -q '^hermes_kms ' /proc/modules 2>/dev/
     log "old module successfully unloaded"
 fi
 
-modprobe hermes_kms "initial_enabled=$INITIAL_ENABLED"
+modprobe hermes_kms "initial_enabled=$INITIAL_ENABLED" "devices=$DEVICES" ${EXTRA_PARAMS}
 [ -d /sys/module/hermes_kms ] || die "modprobe hermes_kms failed to load module"
 log "module loaded successfully"
 
