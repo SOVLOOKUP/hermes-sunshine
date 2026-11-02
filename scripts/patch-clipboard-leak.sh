@@ -74,11 +74,28 @@ docker cp "${ROOT_DIR}/rootfs/usr/local/bin/xclip" "${CONTAINER_NAME}:/usr/local
 
 docker cp "${ROOT_DIR}/rootfs/usr/local/bin/hermes-steam-session" "${CONTAINER_NAME}:/usr/local/bin/hermes-steam-session"
 docker cp "${ROOT_DIR}/rootfs/usr/local/bin/hermes-focus-watch" "${CONTAINER_NAME}:/usr/local/bin/hermes-focus-watch"
+docker cp "${ROOT_DIR}/rootfs/usr/local/bin/entrypoint.sh" "${CONTAINER_NAME}:/usr/local/bin/entrypoint.sh"
 
 docker exec -u root "${CONTAINER_NAME}" chmod +x \
     /usr/bin/wl-copy /usr/bin/wl-paste /usr/bin/xclip \
     /usr/local/bin/wl-copy /usr/local/bin/wl-paste /usr/local/bin/xclip \
-    /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
+    /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch \
+    /usr/local/bin/entrypoint.sh
+
+# Ensure Hermes-KMS render node is strictly read-only (0644) inside the live container
+docker exec -u root "${CONTAINER_NAME}" bash -c '
+    for node in /dev/dri/renderD*; do
+        [ -e "${node}" ] || continue
+        base="${node##*/}"
+        drv="$(readlink -f "/sys/class/drm/${base}/device/driver" 2>/dev/null || true)"
+        if [ -z "${drv}" ]; then
+            drv="$(sed -n "s/^DRIVER=//p" "/sys/class/drm/${base}/device/uevent" 2>/dev/null || true)"
+        fi
+        if [[ "${drv##*/}" =~ hermes[-_]kms ]]; then
+            chmod 0644 "${node}" 2>/dev/null || true
+        fi
+    done
+'
 
 # 5. Final check
 log "step 5: verifying UDP 47999 status..."

@@ -9,7 +9,7 @@
 # "Failed to initialize video capture/encoding". Two past failures combined
 # here:
 #   * a bare `git clone` installs the main branch (0.4.x-dev), not the
-#     release tag the container needs (Hermes 0.6.0 needs v0.4.0 / UAPI 14);
+#     release tag the container needs (Hermes 0.6.0/0.7.0 needs v0.4.0+ / UAPI 14);
 #   * `dkms status`/`modinfo` describe files on disk — the kernel may still be
 #     running a stale instance, so nothing but querying the live driver counts
 #     as proof.
@@ -92,7 +92,7 @@ case "$TAG" in
 esac
 
 # Expected UAPI per Hermes-KMS line: 0.3.x speaks UAPI 9 (Hermes 0.5.x),
-# 0.4.x speaks UAPI 14 (Hermes 0.6.0, which is the companion release for it and
+# 0.4.x speaks UAPI 14 (Hermes 0.6.0/0.7.0, companion releases for it and
 # adds per-frame colour metadata — the HDR path; update BOTH in the same step).
 if [ -z "$EXPECTED_UAPI" ]; then
     case "$VER" in

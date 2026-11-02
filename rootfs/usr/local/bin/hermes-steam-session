@@ -37,9 +37,9 @@ id steam >/dev/null 2>&1             || { warn "no 'steam' user"; exit 0; }
 [ -n "${WAYLAND_DISPLAY:-}" ]        || { warn "no Wayland session"; exit 1; }
 [ -n "${XDG_RUNTIME_DIR:-}" ]        || { warn "XDG_RUNTIME_DIR unset"; exit 1; }
 
-W="${SUNSHINE_CLIENT_WIDTH:-${DISPLAY_WIDTH:-1920}}"
-H="${SUNSHINE_CLIENT_HEIGHT:-${DISPLAY_HEIGHT:-1080}}"
-R="${SUNSHINE_CLIENT_FPS:-${DISPLAY_REFRESH:-60}}"
+W="${HERMES_CLIENT_WIDTH:-${SUNSHINE_CLIENT_WIDTH:-${DISPLAY_WIDTH:-1920}}}"
+H="${HERMES_CLIENT_HEIGHT:-${SUNSHINE_CLIENT_HEIGHT:-${DISPLAY_HEIGHT:-1080}}}"
+R="${HERMES_CLIENT_FPS:-${SUNSHINE_CLIENT_FPS:-${DISPLAY_REFRESH:-60}}}"
 log "launching Steam Big Picture at ${W}x${H}@${R}"
 
 runtime="/run/user/$(id -u steam)"
@@ -174,9 +174,15 @@ if [ "${STEAM_GAMESCOPE}" != "true" ] && command -v xhost >/dev/null 2>&1; then
     chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
 fi
 
+DRI_PRIME_ENV=()
+[ -n "${DRI_PRIME:-}" ] && DRI_PRIME_ENV=(DRI_PRIME="${DRI_PRIME}")
+
 cleanup_session() {
     log "session ending; cleaning up background clipboard and child processes..."
     killall -9 wl-copy wl-paste xclip 2>/dev/null || true
+    # Kill any lingering game/steam processes running under the steam user
+    # so the GPU, VRAM, and audio resources are completely freed for the next session.
+    pkill -9 -u steam 2>/dev/null || true
 }
 trap cleanup_session EXIT INT TERM
 
@@ -187,7 +193,7 @@ runuser -u steam -- env \
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY##*/}" \
     PULSE_SERVER="${PULSE_SERVER:-unix:/run/pipewire/pulse/native}" \
     RADV_PERFTEST="${RADV_PERFTEST:-gpl}" \
-    DRI_PRIME="${DRI_PRIME:-1}" \
+    "${DRI_PRIME_ENV[@]}" \
     mesa_glthread="${mesa_glthread:-true}" \
     vblank_mode="${vblank_mode:-0}" \
     "${XENV[@]}" \

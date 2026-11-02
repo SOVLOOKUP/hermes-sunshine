@@ -562,19 +562,6 @@ fi
 start_compositor() {
     # Build the effective sway config from the template (resolution is applied
     # afterwards via swaymsg, since the output name depends on the backend).
-    # HDR only exists end to end when the module advertises it: the connector
-    # colour properties and 10-bit scanout come from hdr_enable=1 color_depth=10,
-    # and sway >= 1.12 sets BT2020/PQ on top of that. Keep the directive out of
-    # the config otherwise, so an SDR module is never asked for HDR.
-    local hdr_on="false"
-    if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
-        hdr_on="true"
-        log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
-    fi
-    write_sway_config "${hdr_on}"
-
-    reserve_foreign_x_displays
-
     # Prefer the Hermes-KMS DRM output; fall back to the wlroots headless backend.
     local use_kms="false"
     case "${HERMES_KMS:-auto}" in
@@ -582,6 +569,19 @@ start_compositor() {
         off) use_kms="false" ;;
         *)   [ -n "${HERMES_KMS_CARD}" ] && use_kms="true" ;;
     esac
+
+    # HDR only exists end to end when the module advertises it: the connector
+    # colour properties and 10-bit scanout come from hdr_enable=1 color_depth=10,
+    # and sway >= 1.12 sets BT2020/PQ on top of that. Keep the directive out of
+    # the config otherwise, so an SDR module is never asked for HDR.
+    local hdr_on="false"
+    if [ "${use_kms}" = "true" ] && [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+        hdr_on="true"
+        log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
+    fi
+    write_sway_config "${hdr_on}"
+
+    reserve_foreign_x_displays
 
     export XDG_SESSION_TYPE=wayland
     export XDG_CURRENT_DESKTOP=sway

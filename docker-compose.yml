@@ -92,6 +92,7 @@ services:
     #   HERMES_KMS: auto         # virtual display: auto | on | off
     #   RENDER_NODE: auto        # GPU render node: auto | /dev/dri/renderD128 | /dev/dri/renderD129 (choose discrete GPU)
     #   ADDRESS_FAMILY: both     # both | ipv4 | ipv6 (set to ipv4 if host has IPv6/dual-stack port collision)
+    #   IGNORE_ENCODER_PROBE_FAILURE: disabled # enabled | disabled (bypass synthetic capture check on unusual headless setups)
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"
     #   DISPLAY_REFRESH: "60"
@@ -129,5 +130,5 @@ services:
     #   context: .
     #   dockerfile: Dockerfile
     #   args:
-    #     HERMES_REF: latest       # or a specific tag, e.g. v0.6.0
+    #     HERMES_REF: latest       # or a specific tag, e.g. v0.7.0
     #     USE_CN_MIRROR: "true"    # fast USTC/Tsinghua mirrors (set false abroad)
