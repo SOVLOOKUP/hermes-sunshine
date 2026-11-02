@@ -98,10 +98,11 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     find /usr -type f -name '*.a' -delete 2>/dev/null || true; \
     rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*; \
     if [ -f /usr/bin/wl-copy ]; then mv -f /usr/bin/wl-copy /usr/bin/wl-copy.real; fi; \
+    if [ -f /usr/bin/wl-paste ]; then mv -f /usr/bin/wl-paste /usr/bin/wl-paste.real; fi; \
     if [ -f /usr/bin/xclip ]; then mv -f /usr/bin/xclip /usr/bin/xclip.real; fi
 
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/* /usr/bin/wl-copy /usr/bin/xclip 2>/dev/null || true
+RUN chmod +x /usr/local/bin/* /usr/bin/wl-copy /usr/bin/wl-paste /usr/bin/xclip 2>/dev/null || true
 
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 

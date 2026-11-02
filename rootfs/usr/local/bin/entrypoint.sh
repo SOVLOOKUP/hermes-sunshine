@@ -1195,7 +1195,7 @@ check_stream_ports() {
     # "Couldn't create an ENet host on [:::47999]; the port is most likely already in use."
     if grep -iqE '[[:space:]][0-9A-F]+:BB7F[[:space:]]' /proc/net/udp /proc/net/udp6 2>/dev/null; then
         warn "UDP port 47999 is currently occupied on the host network. If an existing sunshine/hermes instance or previous session is lingering, streaming will fail with ENet bind error. Run 'sudo ss -ulpn | grep 47999' on the host to inspect."
-        killall -9 wl-copy xclip 2>/dev/null || true
+        killall -9 wl-copy wl-paste xclip 2>/dev/null || true
     fi
 }
 

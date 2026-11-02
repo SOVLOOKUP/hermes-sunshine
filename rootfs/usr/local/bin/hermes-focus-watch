@@ -60,8 +60,7 @@ process_event() {
                 swaymsg 'workspace 1' >/dev/null 2>&1 || true
             fi
             # Clean up lingering clipboard daemons that may hold leaked socket fds (e.g. UDP 47999)
-            killall -9 wl-copy 2>/dev/null || true
-            killall -9 xclip 2>/dev/null || true
+            killall -9 wl-copy wl-paste xclip 2>/dev/null || true
             CURRENT_STATE="idle"
         fi
     fi

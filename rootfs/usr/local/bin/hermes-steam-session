@@ -176,8 +176,7 @@ fi
 
 cleanup_session() {
     log "session ending; cleaning up background clipboard and child processes..."
-    killall -9 wl-copy 2>/dev/null || true
-    killall -9 xclip 2>/dev/null || true
+    killall -9 wl-copy wl-paste xclip 2>/dev/null || true
 }
 trap cleanup_session EXIT INT TERM
 
