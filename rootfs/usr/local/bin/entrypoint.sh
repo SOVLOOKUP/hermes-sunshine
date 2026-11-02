@@ -782,10 +782,8 @@ start_pipewire_watchdog() {
 # container). Must run before we spawn gamescope; the build-time `usermod -aG
 # render` can't cover a GID that only exists at runtime.
 grant_gpu_access() {
-    local user="$1" node gid gname
+    local user="$1" node gid gname drv
     id "${user}" >/dev/null 2>&1 || return 0
-    # Ensure all DRI nodes are world readable/writable so steam can open any GPU node
-    chmod 0666 /dev/dri/card[0-9]* /dev/dri/renderD[0-9]* 2>/dev/null || true
     # Clean up a dangerous legacy grant: older versions added the user to the
     # root group for root:root DRM nodes (see the gid-0 skip below). Group
     # membership persists in the container filesystem across container restarts,
@@ -802,6 +800,15 @@ grant_gpu_access() {
     user_groups="$(id -G "${user}" 2>/dev/null)" || user_groups=""
     for node in /dev/dri/card[0-9]* /dev/dri/renderD[0-9]*; do
         [ -e "${node}" ] || continue
+        drv="$(drm_driver "${node}")"
+        # Hermes-KMS render node must remain READ-ONLY (0644) so Chromium/CEF (Steam UI)
+        # probes it with O_RDWR, sees EACCES, and skips it instead of attempting 3D
+        # GPU acceleration on the virtual capture card (Hermes PR #64 & Hermes-KMS PR #14).
+        if is_hermes_kms "${drv}"; then
+            chmod 0644 "${node}" 2>/dev/null || true
+        else
+            chmod 0666 "${node}" 2>/dev/null || true
+        fi
         # Use bash parameter expansion to extract GID (avoid stat fork)
         gid="$(stat -c '%g' "${node}" 2>/dev/null)" || continue
         [ -n "${gid}" ] || continue
@@ -869,6 +876,12 @@ prepare_steam() {
         chgrp input /dev/uinput 2>/dev/null || true
         chmod 660 /dev/uinput 2>/dev/null || true
     fi
+    # Grant access to /dev/hidraw* for advanced controller features (libvirtualhid DualSense / gyro / rumble)
+    for dev in /dev/hidraw*; do
+        [ -c "${dev}" ] || continue
+        chgrp input "${dev}" 2>/dev/null || true
+        chmod 660 "${dev}" 2>/dev/null || true
+    done
 
     # Grant access to input devices whose GID doesn't match container's input group.
     # Cache user groups and check the container's dynamic input GID to avoid repeated usermod calls.
@@ -990,11 +1003,14 @@ seed_config() {
         set_conf_key virtual_display_backend hermes_kms
         set_conf_key headless_mode enabled
     else
-        set_conf_key virtual_display_backend headless
+        set_conf_key virtual_display_backend none
         set_conf_key headless_mode disabled
     fi
     if [ -n "${RENDER_NODE:-}" ]; then
         set_conf_key adapter_name "${RENDER_NODE}"
+    fi
+    if [ "${IGNORE_ENCODER_PROBE_FAILURE:-disabled}" = "enabled" ] || [ "${IGNORE_ENCODER_PROBE_FAILURE:-false}" = "true" ]; then
+        set_conf_key ignore_encoder_probe_failure enabled
     fi
     # Audio: let Hermes fully own its loopback sinks. It creates
     # sink-sunshine-stereo / -surround51 / -surround71, sets the one matching the
@@ -1071,80 +1087,83 @@ sanitize_apps() {
 }
 
 # --- enable virtual displays on the KMS path --------------------------------
+# --- configure virtual displays for apps ------------------------------------
 # On hermes-kms the only real output is the per-session "Virtual-1" connector,
 # which exists only while Hermes is serving a session that asked for a virtual
-# display. The shipped app list has "virtual-display": false, and with that
-# Hermes falls back to whatever output the compositor already has - the 1x1
-# headless placeholder at 999999,0. The symptom is a 1x1 stream with
-# "Display is HDR: false" instead of the game. Flip every app on, idempotently;
-# on the headless fallback the flag stays as the user left it.
-enable_virtual_displays() {
-    [ "${KMS_ZEROCOPY}" = "true" ] || return 0
+# display.
+# In Hermes 0.7.0 (PR #58), if an app has "virtual-display": true but the backend
+# is "none", Hermes fails closed with 503 instead of falling back to physical.
+# Therefore:
+#   * When KMS_ZEROCOPY is true: ensure virtual-display=true for all apps.
+#   * When KMS_ZEROCOPY is false: ensure virtual-display=false for all apps.
+configure_virtual_displays() {
     [ -f "${APPS_JSON}" ] || return 0
-    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot enable virtual displays"; return 0; }
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot configure virtual displays"; return 0; }
     local tmp; tmp="$(mktemp)"
-    if jq '(.apps[]?["virtual-display"]) = true' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+    local vdisp="false"
+    [ "${KMS_ZEROCOPY}" = "true" ] && vdisp="true"
+    if jq --argjson vd "${vdisp}" '(.apps[]?["virtual-display"]) = $vd' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
         if cmp -s "${tmp}" "${APPS_JSON}"; then
             rm -f "${tmp}"
         else
             cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
             rm -f "${tmp}"
-            log "apps.json: enabled virtual display for every app (Hermes-KMS mode)"
+            log "apps.json: set virtual-display=${vdisp} for every app"
         fi
     else
         rm -f "${tmp}"
-        warn "could not enable virtual displays in apps.json"
+        warn "could not configure virtual displays in apps.json"
     fi
 }
 
-# --- drop the desktop-style app ---------------------------------------------
-# This image is streamed as an appliance: the only launcher is "Steam Big
-# Picture". A "Desktop" entry would hand the client an empty sway session (no
-# panel, no launcher, nothing to click), so remove it from the shipped list and
-# from configs created by older versions, idempotently.
-drop_desktop_app() {
+# --- clean up unsupported sample apps ---------------------------------------
+# Hermes ships default app templates ("Desktop", "Low Res Desktop",
+# "Gamescope Steam Session") that do not fit this appliance container.
+# Remove them idempotently so existing configs get cleaned up too.
+cleanup_unsupported_apps() {
     [ -f "${APPS_JSON}" ] || return 0
-    grep -q '"name": *"Desktop"' "${APPS_JSON}" 2>/dev/null || return 0
-    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot drop the Desktop app"; return 0; }
+    command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot clean up sample apps"; return 0; }
     local tmp; tmp="$(mktemp)"
-    if jq '(.apps // []) |= map(select(.name != "Desktop"))' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
-        cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
-        log "apps.json: removed the Desktop app"
+    if jq '(.apps // []) |= map(select(.name != "Desktop" and .name != "Low Res Desktop" and .name != "Gamescope Steam Session"))' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
+        if ! cmp -s "${tmp}" "${APPS_JSON}"; then
+            cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
+            log "apps.json: removed unsupported sample apps (Desktop, Low Res Desktop, Gamescope Steam Session)"
+        fi
     else
-        warn "could not remove the Desktop app from apps.json"
+        warn "could not clean up sample apps from apps.json"
     fi
     rm -f "${tmp}"
 }
 
 # --- register the per-session Steam launcher --------------------------------
-# Point the "Steam Big Picture" app's cmd at our per-session
-# launcher so Hermes runs it (at the client's negotiated resolution) when the app
-# is streamed. Fresh /config volumes already carry this in the apps.json template;
-# this patches an existing /config idempotently — updating the cmd, or appending
-# the app when it is missing. Only touches the file when steam + gamescope exist.
+# Point the "Steam Big Picture" app's cmd at our per-session launcher so Hermes
+# runs it at the client's negotiated resolution when the app is streamed.
 configure_steam_app() {
     command -v steam >/dev/null 2>&1 || return 0
     [ -f "${APPS_JSON}" ] || return 0
     command -v jq >/dev/null 2>&1 || { warn "jq missing; cannot register the Steam app"; return 0; }
-    # Already wired to the launcher? nothing to do.
-    jq -e --arg cmd "${STEAM_SESSION_CMD}" \
-        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd)' \
+    local cover="steam-big-picture.png"
+    local vdisp="false"
+    [ "${KMS_ZEROCOPY}" = "true" ] && vdisp="true"
+    # Already wired to the launcher and matching vdisp?
+    jq -e --arg cmd "${STEAM_SESSION_CMD}" --argjson vd "${vdisp}" \
+        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd and .["virtual-display"] == $vd)' \
         "${APPS_JSON}" >/dev/null 2>&1 && return 0
     local tmp; tmp="$(mktemp)"
-    if jq --arg cmd "${STEAM_SESSION_CMD}" '
+    if jq --arg cmd "${STEAM_SESSION_CMD}" --arg img "${cover}" --argjson vd "${vdisp}" '
           if any(.apps[]?; .name == "Steam Big Picture")
-          then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd else . end)
+          then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd | .["virtual-display"] = $vd | .["image-path"] = $img else . end)
           else .apps += [{
               "name": "Steam Big Picture",
-              "image-path": "steam.png",
-              "virtual-display": true,
+              "image-path": $img,
+              "virtual-display": $vd,
               "allow-client-commands": false,
               "cmd": $cmd
           }]
           end
         ' "${APPS_JSON}" > "${tmp}" 2>/dev/null && [ -s "${tmp}" ]; then
         cat "${tmp}" > "${APPS_JSON}"   # keep the mounted file's inode/ownership
-        log "registered Steam Big Picture as a per-session app (cmd=${STEAM_SESSION_CMD})"
+        log "registered Steam Big Picture as a per-session app (cmd=${STEAM_SESSION_CMD}, virtual-display=${vdisp})"
     else
         warn "could not register the Steam app in apps.json (left unchanged)"
     fi
@@ -1189,21 +1208,38 @@ else
     warn "/dev/dri not present — no GPU. Wayland capture/hardware encoding will not work."
 fi
 
+ensure_clipboard_wrappers() {
+    local bin
+    for bin in wl-copy wl-paste xclip; do
+        if [ -f "/usr/bin/${bin}" ] && [ ! -f "/usr/bin/${bin}.real" ]; then
+            if ! grep -q "/proc/self/fd" "/usr/bin/${bin}" 2>/dev/null; then
+                mv -f "/usr/bin/${bin}" "/usr/bin/${bin}.real" 2>/dev/null || true
+                if [ -f "/usr/local/bin/${bin}" ]; then
+                    cp -f "/usr/local/bin/${bin}" "/usr/bin/${bin}" 2>/dev/null || true
+                fi
+                chmod +x "/usr/bin/${bin}" 2>/dev/null || true
+                log "installed socket-closing wrapper for /usr/bin/${bin}"
+            fi
+        fi
+    done
+}
+
 check_stream_ports() {
-    # Port 47999 (0xBB7F in hex) is the ENet control/handshake port.
+    # Ports 47998-48000 (0xBB7E - 0xBB80 in hex) are the video/control/audio UDP streaming ports.
     # When occupied by a lingering process or duplicate container, streaming will fail with
     # "Couldn't create an ENet host on [:::47999]; the port is most likely already in use."
-    if grep -iqE '[[:space:]][0-9A-F]+:BB7F[[:space:]]' /proc/net/udp /proc/net/udp6 2>/dev/null; then
-        warn "UDP port 47999 is currently occupied on the host network. If an existing sunshine/hermes instance or previous session is lingering, streaming will fail with ENet bind error. Run 'sudo ss -ulpn | grep 47999' on the host to inspect."
+    if grep -iqE '[[:space:]][0-9A-F]+:BB(7E|7F|80)[[:space:]]' /proc/net/udp /proc/net/udp6 2>/dev/null; then
+        warn "UDP streaming ports (47998-48000) are currently occupied on the host network. If an existing sunshine/hermes instance or previous session is lingering, streaming will fail with ENet bind error. Run 'sudo ss -ulpn | grep -E \"4799[89]|48000\"' on the host to inspect."
         killall -9 wl-copy wl-paste xclip 2>/dev/null || true
     fi
 }
 
 seed_config
 sanitize_apps
-drop_desktop_app
-enable_virtual_displays
+cleanup_unsupported_apps
+configure_virtual_displays
 configure_steam_app
+ensure_clipboard_wrappers
 check_stream_ports
 log "launching hermes with config: ${HERMES_CONFIG}"
 log "web UI will be available at https://<host>:47990"

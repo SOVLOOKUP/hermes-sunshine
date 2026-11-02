@@ -5,7 +5,7 @@
   "apps": [
     {
       "name": "Steam Big Picture",
-      "image-path": "steam.png",
+      "image-path": "steam-big-picture.png",
       "virtual-display": true,
       "allow-client-commands": false,
       "cmd": "/usr/local/bin/hermes-steam-session"
