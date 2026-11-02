@@ -29,8 +29,8 @@
 #   6. start the container again.
 #
 # Usage:
-#   sudo ./build-hermes-kms.sh                 # install v0.4.0 (UAPI 14; pairs with Hermes 0.6.0)
-#   sudo ./build-hermes-kms.sh v0.4.0          # explicit tag
+#   sudo ./build-hermes-kms.sh                 # install v0.4.1 (UAPI 14; pairs with Hermes 0.6.0/0.7.0)
+#   sudo ./build-hermes-kms.sh v0.4.1          # explicit tag
 #   sudo ./build-hermes-kms.sh verify          # only re-check the RUNNING module
 #
 # Environment overrides:
@@ -40,7 +40,7 @@
 #   WORKDIR=/tmp/hermes-kms-build
 set -euo pipefail
 
-TAG="${1:-v0.4.0}"
+TAG="${1:-v0.4.1}"
 CONTAINER_NAME="${CONTAINER_NAME:-sunshine}"
 INITIAL_ENABLED="${INITIAL_ENABLED:-0}"
 EXPECTED_UAPI="${EXPECTED_UAPI:-}"
@@ -64,7 +64,7 @@ verify_running() {
     local kmsctl="$WORKDIR/kmsctl"
     [ -x "$kmsctl" ] || die "no kmsctl at $kmsctl — run a full build first"
     local out uapi ver
-    out="$("$kmsctl" version --verbose)" || die "kmsctl could not reach the driver (is the module loaded?)"
+    out="$("$kmsctl" --verbose version)" || die "kmsctl could not reach the driver (is the module loaded?)"
     printf '%s\n' "$out"
     uapi="$(sed -n 's/^uapi_version=//p' <<<"$out")"
     ver="$(sed -n 's/^driver_version=//p' <<<"$out")"
@@ -81,7 +81,7 @@ verify_running() {
 }
 
 if [ "$TAG" = "verify" ]; then
-    TAG="${HERMES_KMS_TAG:-v0.4.0}"
+    TAG="${HERMES_KMS_TAG:-v0.4.1}"
     verify_running
     exit 0
 fi
@@ -139,6 +139,12 @@ fi
 # think we are building (this is how a main-branch 0.4.0 got installed as "0.3.2").
 conf_ver="$(sed -n 's/^PACKAGE_VERSION="\?\([^"]*\)"\?/\1/p' "$SRCDIR/dkms.conf")"
 [ "$conf_ver" = "$VER" ] || die "$SRCDIR/dkms.conf says version '$conf_ver', expected '$VER' — wrong source tree?"
+
+src_maj="$(sed -n 's/^#define HERMES_KMS_DRIVER_MAJOR \([0-9]*\)/\1/p' "$SRCDIR/kernel/hermes-kms/hermes_kms.c")"
+src_min="$(sed -n 's/^#define HERMES_KMS_DRIVER_MINOR \([0-9]*\)/\1/p' "$SRCDIR/kernel/hermes-kms/hermes_kms.c")"
+src_pat="$(sed -n 's/^#define HERMES_KMS_DRIVER_PATCH \([0-9]*\)/\1/p' "$SRCDIR/kernel/hermes-kms/hermes_kms.c")"
+src_driver_ver="$src_maj.$src_min.$src_pat"
+[ "$src_driver_ver" = "$VER" ] || die "$SRCDIR source defines driver_version $src_driver_ver, expected $VER — stale tree in $WORKDIR? Run: rm -rf $WORKDIR"
 
 # --- 2. conditional compat patch (trimmed kernels) ---------------------------
 log "kernel $KVER: $([ -e "$KHDR" ] && echo 'has' || echo 'lacks') drm/drm_dumb_buffers.h"
@@ -208,14 +214,30 @@ PYEOF
 # Plain `dkms remove --all` also deletes /usr/src/hermes-kms-$VER, so always
 # (re)copy the source; `dkms add` after rm is then always fresh.
 log "installing hermes-kms/$VER for kernel $KVER"
-dkms remove -m hermes-kms -v "$VER" --all >/dev/null 2>&1 || true
+
+# Clean any existing DKMS instances (e.g. older 0.4.0 registrations)
+for v in $(dkms status 2>/dev/null | awk -F '[,/: ]+' '$1 == "hermes-kms" {print $2}' | sort -u); do
+    log "removing prior DKMS registration: hermes-kms/$v"
+    dkms remove -m hermes-kms -v "$v" --all >/dev/null 2>&1 || true
+done
+
+# Clean stale module binaries outside updates/dkms that depmod might prioritize
+stale_kos=$(find "/lib/modules/$KVER" -name "*hermes_kms*" ! -path "*/updates/dkms/*" 2>/dev/null || true)
+if [ -n "$stale_kos" ]; then
+    warn "found stale hermes_kms modules outside updates/dkms; removing:"
+    printf '%s\n' "$stale_kos"
+    find "/lib/modules/$KVER" -name "*hermes_kms*" ! -path "*/updates/dkms/*" -delete 2>/dev/null || true
+fi
+
 rm -rf "/usr/src/hermes-kms-$VER"
 mkdir -p "/usr/src/hermes-kms-$VER"
 cp -a "$SRCDIR/." "/usr/src/hermes-kms-$VER/"
 dkms add -m hermes-kms -v "$VER"
 dkms build -m hermes-kms -v "$VER" -k "$KVER"
-dkms install -m hermes-kms -v "$VER" -k "$KVER"
+dkms install --force -m hermes-kms -v "$VER" -k "$KVER"
 depmod -a
+resolved_ko="$(modinfo -F filename hermes_kms 2>/dev/null || echo 'unknown')"
+log "depmod resolved hermes_kms -> $resolved_ko"
 
 # --- 4. swap the loaded module ------------------------------------------------
 if container_exists && [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" = "true" ]; then
@@ -226,11 +248,59 @@ else
     STOPPED=0
 fi
 
-if lsmod | grep -q '^hermes_kms\b'; then
-    modprobe -r hermes_kms || die "modprobe -r failed: something besides $CONTAINER_NAME holds the module (lsof /dev/dri/*)"
+# Clean unload logic modeled after upstream scripts/hermes-kms-unload:
+# DRM platform devices MUST be detached from sysfs unbind first; otherwise
+# compositors, seatd, or lingering file descriptors prevent module unloading.
+if [ -d /sys/module/hermes_kms ] || grep -q '^hermes_kms ' /proc/modules 2>/dev/null; then
+    log "active hermes_kms detected — detaching DRM cards and unloading module"
+
+    # 1. Clean any configfs cards if present
+    if [ -d /sys/kernel/config/hermes-kms ]; then
+        for g in /sys/kernel/config/hermes-kms/*; do
+            [ -d "$g" ] && rmdir "$g" 2>/dev/null || true
+        done
+    fi
+
+    # 2. Stop seatd helper service if running
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop 'hermes-kms-seatd@*.service' 2>/dev/null || true
+    fi
+
+    # 3. Detach static DRM platform cards before unloading
+    pdrv=/sys/bus/platform/drivers/hermes-kms
+    if [ -w "$pdrv/unbind" ]; then
+        for dev in "$pdrv"/hermes-kms*; do
+            [ -L "$dev" ] || continue
+            printf '%s\n' "${dev##*/}" > "$pdrv/unbind" 2>/dev/null || true
+        done
+    fi
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle || true
+    fi
+
+    # 4. Retry modprobe -r / rmmod
+    unloaded=0
+    for attempt in 1 2 3 4 5; do
+        if modprobe -r hermes_kms 2>/dev/null || rmmod hermes_kms 2>/dev/null; then
+            unloaded=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$unloaded" != 1 ] && [ -d /sys/module/hermes_kms ]; then
+        holders=""
+        if command -v fuser >/dev/null 2>&1; then
+            holders="$(fuser -v /dev/dri/* 2>&1 || true)"
+        fi
+        die "could not unload hermes_kms (module still active). Close holding processes or reboot:\n$holders"
+    fi
+    log "old module successfully unloaded"
 fi
+
 modprobe hermes_kms "initial_enabled=$INITIAL_ENABLED"
-log "module reloaded"
+[ -d /sys/module/hermes_kms ] || die "modprobe hermes_kms failed to load module"
+log "module loaded successfully"
 
 # --- 5. verification gate: query the LIVE driver ------------------------------
 log "building hermes-kmsctl for verification"
@@ -239,7 +309,7 @@ gcc -static -O2 -I"$SRCDIR/include/uapi" \
     || gcc -O2 -I"$SRCDIR/include/uapi" \
         "$SRCDIR/tools/hermes-kmsctl/hermes_kmsctl.c" -o "$WORKDIR/kmsctl"
 
-out="$( "$WORKDIR/kmsctl" version --verbose )" || die "kmsctl cannot reach the driver — module load failed? (dmesg | grep hermes)"
+out="$( "$WORKDIR/kmsctl" --verbose version )" || die "kmsctl cannot reach the driver — module load failed? (dmesg | grep hermes)"
 printf '%s\n' "$out"
 uapi="$(sed -n 's/^uapi_version=//p' <<<"$out")"
 ver="$(sed -n 's/^driver_version=//p' <<<"$out")"
@@ -250,10 +320,12 @@ fi
 log "OK: live module driver=$ver UAPI=$uapi"
 
 # --- 6. container back up ------------------------------------------------------
-if [ "$STOPPED" = 1 ]; then
-    log "starting container $CONTAINER_NAME"
-    docker start "$CONTAINER_NAME" >/dev/null
-    log "container entrypoint re-detects card1 and restores virtual_display_backend = hermes_kms"
+if container_exists; then
+    if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" != "true" ]; then
+        log "starting container $CONTAINER_NAME"
+        docker start "$CONTAINER_NAME" >/dev/null
+        log "container entrypoint re-detects card1 and restores virtual_display_backend = hermes_kms"
+    fi
 fi
 
-log "done — verify any time with: sudo $WORKDIR/kmsctl version --verbose"
+log "done — verify any time with: sudo $WORKDIR/kmsctl --verbose version"

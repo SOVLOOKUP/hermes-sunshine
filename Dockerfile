@@ -96,10 +96,12 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     rm -rf /usr/share/man/* /usr/share/doc/* /usr/share/info/* /usr/share/gtk-doc/* /usr/share/help/* 2>/dev/null || true; \
     find /usr/share/locale -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name 'zh*' ! -name 'locale.alias' -exec rm -rf {} + 2>/dev/null || true; \
     find /usr -type f -name '*.a' -delete 2>/dev/null || true; \
-    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*
+    rm -rf /var/lib/pacman/sync/* /var/log/pacman.log /tmp/* /var/tmp/*; \
+    if [ -f /usr/bin/wl-copy ]; then mv -f /usr/bin/wl-copy /usr/bin/wl-copy.real; fi; \
+    if [ -f /usr/bin/xclip ]; then mv -f /usr/bin/xclip /usr/bin/xclip.real; fi
 
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch
+RUN chmod +x /usr/local/bin/* /usr/bin/wl-copy /usr/bin/xclip 2>/dev/null || true
 
 EXPOSE 47984-47990/tcp 48010/tcp 47998-48000/udp
 

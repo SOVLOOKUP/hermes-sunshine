@@ -1,0 +1,12 @@
+#!/bin/sh
+# Prevent file descriptor leakage into background daemon
+for fd in /proc/self/fd/*; do
+    f="${fd##*/}"
+    if [ "$f" -ge 3 ] 2>/dev/null; then
+        eval "exec $f>&-" 2>/dev/null || true
+    fi
+done
+if [ -x /usr/bin/xclip.real ]; then
+    exec /usr/bin/xclip.real "$@"
+fi
+exit 0

@@ -59,6 +59,9 @@ process_event() {
                 swaymsg 'output "HEADLESS-1" enable; output "HEADLESS-1" position 0 0; output "HEADLESS-1" resolution 1280x720' >/dev/null 2>&1 || true
                 swaymsg 'workspace 1' >/dev/null 2>&1 || true
             fi
+            # Clean up lingering clipboard daemons that may hold leaked socket fds (e.g. UDP 47999)
+            killall -9 wl-copy 2>/dev/null || true
+            killall -9 xclip 2>/dev/null || true
             CURRENT_STATE="idle"
         fi
     fi

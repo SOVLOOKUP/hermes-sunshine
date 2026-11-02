@@ -174,8 +174,15 @@ if [ "${STEAM_GAMESCOPE}" != "true" ] && command -v xhost >/dev/null 2>&1; then
     chmod 0666 /tmp/.X11-unix/X* 2>/dev/null || true
 fi
 
-# shellcheck disable=SC2016
-exec runuser -u steam -- env \
+cleanup_session() {
+    log "session ending; cleaning up background clipboard and child processes..."
+    killall -9 wl-copy 2>/dev/null || true
+    killall -9 xclip 2>/dev/null || true
+}
+trap cleanup_session EXIT INT TERM
+
+log "launching Steam Big Picture (Gamepad UI)..."
+runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY##*/}" \
@@ -190,16 +197,8 @@ exec runuser -u steam -- env \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
     "${COMPOSITOR_CMD[@]}" \
-    bash -c '
-        delay=2; max=60
-        while :; do
-            SECONDS=0
-            steam -gamepadui
-            rc=$?
-            ran=$SECONDS
-            [ "${ran}" -ge 30 ] && delay=2
-            printf "[hermes-steam] Steam exited (rc=%s) after %ss; relaunching in %ss\n" "${rc}" "${ran}" "${delay}"
-            sleep "${delay}"
-            [ "${ran}" -lt 30 ] && { delay=$(( delay * 2 )); [ "${delay}" -gt "${max}" ] && delay="${max}"; }
-        done
-    '
+    steam -gamepadui
+rc=$?
+
+log "Steam exited (rc=${rc}); terminating session."
+exit "${rc}"

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Prevent file descriptor leakage (such as ENet UDP 47999 and KMS fds) into background daemon
+for fd in /proc/self/fd/*; do
+    f="${fd##*/}"
+    if [ "$f" -ge 3 ] 2>/dev/null; then
+        eval "exec $f>&-" 2>/dev/null || true
+    fi
+done
+if [ -x /usr/bin/wl-copy.real ]; then
+    exec /usr/bin/wl-copy.real "$@"
+fi
+if [ -x /usr/bin/wl-copy ]; then
+    exec /usr/bin/wl-copy "$@"
+fi
+exit 0
