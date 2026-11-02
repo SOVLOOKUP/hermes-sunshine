@@ -4,7 +4,7 @@ services:
     # It boots straight into Steam Big Picture as a per-session app (see README).
     image: ghcr.io/sovlookup/hermes-sunshine:latest
     # Or from Docker Hub:
-    # image: sovlookup/hermes-sunshine:latest
+    # image: gonorth/hermes-sunshine:latest
     # China users: swap the line above for the Nanjing University GHCR mirror to
     # pull much faster (uncomment this, comment the ghcr.io line above):
     # image: ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest

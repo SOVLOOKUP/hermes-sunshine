@@ -64,8 +64,12 @@ from a browser (NoVNC) and don't mind X11's resolution quirks.
 ```
 Dockerfile                                single-stage build (download + install pkg)
 docker-compose.yml                        ready-to-run service definition
-rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch
-rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher
+scripts/patch-clipboard-leak.sh           one-shot hotfix script for clipboard FD leak & port 47999 release
+host-module/build-hermes-kms.sh           host kernel module builder, DKMS installer & live UAPI verifier
+rootfs/usr/local/bin/entrypoint.sh        session bring-up + launch + multi-GPU discovery
+rootfs/usr/local/bin/hermes-steam-session per-session Steam Big Picture launcher & lifecycle reaper
+rootfs/usr/local/bin/hermes-focus-watch   display plug/unplug watcher & idle daemon cleaner
+rootfs/usr/bin/wl-copy, wl-paste, xclip   FD-sanitizing wrappers blocking descriptor leaks
 rootfs/etc/sway/config                    Wayland session template
 rootfs/etc/wireplumber/wireplumber.conf.d/ disable hardware audio monitors (keep Hermes' loopback sinks)
 ```
@@ -93,15 +97,15 @@ cannot be loaded from a container):
 # drm/drm_dumb_buffers.h), builds via DKMS, swaps the loaded module (stopping
 # the container first) and verifies the LIVE driver version + UAPI with a
 # static hermes-kmsctl:
-sudo ./host-module/build-hermes-kms.sh            # installs v0.4.0 (UAPI 14)
+sudo ./host-module/build-hermes-kms.sh            # installs v0.4.1 (UAPI 14; pairs with Hermes 0.6.0/0.7.0)
 sudo ./host-module/build-hermes-kms.sh verify    # re-check the running module any time
 
 # Manual equivalent — IMPORTANT: pin the tag. Each Hermes release speaks one
-# Hermes-KMS UAPI line: 0.5.x wants UAPI 9 (Hermes-KMS 0.3.x), 0.6.x wants UAPI
-# 13/14 (Hermes-KMS 0.4.0). A mismatching module loads fine but capture ioctls
+# Hermes-KMS UAPI line: 0.5.x wants UAPI 9 (Hermes-KMS 0.3.x), 0.6.x/0.7.x wants UAPI
+# 14 (Hermes-KMS 0.4.1). A mismatching module loads fine but capture ioctls
 # fail or degrade, and sessions die with "Failed to initialize video capture/
 # encoding" / "no active scanout geometry yet" in the container log.
-git clone --branch v0.4.0 --depth 1 https://github.com/MrOz59/Hermes-KMS
+git clone --branch v0.4.1 --depth 1 https://github.com/MrOz59/Hermes-KMS
 cd Hermes-KMS
 sudo make dkms-install          # or: make && sudo insmod kernel/hermes-kms/hermes_kms.ko
 
@@ -112,7 +116,7 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 
 > **Upgrading the host module?** Each Hermes release expects a specific
 > Hermes-KMS UAPI line (Hermes 0.5.x ↔ UAPI 7/8/9, i.e. Hermes-KMS 0.3.x;
-> Hermes 0.6.x ↔ UAPI 13/14, i.e. Hermes-KMS 0.4.0). The script above derives the expected
+> Hermes 0.6.x/0.7.x ↔ UAPI 14, i.e. Hermes-KMS 0.4.1). The script above derives the expected
 > UAPI from the tag and refuses to pass verification on a mismatch, so the same
 > command keeps working for future releases — but the container image must be
 > updated to the matching Hermes release in the same step. Never install from
@@ -120,14 +124,14 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 > image, and reload the module (`modprobe -r hermes_kms && modprobe hermes_kms
 > initial_enabled=0`) before restarting the container.
 
-### HDR (module 0.4.0 / Hermes 0.6.0)
+### HDR (Hermes-KMS ≥ 0.4.0 / Hermes ≥ 0.6.0)
 
-Hermes-KMS 0.4.0 speaks UAPI 14 and is the first line that can carry HDR: with
+Hermes-KMS ≥ 0.4.0 speaks UAPI 14 and is the first line that can carry HDR: with
 `hdr_enable=1` (default off, load-time only) the synthetic EDID grows a CTA-861
 extension with HDR Static Metadata + BT2020 Colorimetry blocks and the connector
 exposes `HDR_OUTPUT_METADATA` and `Colorspace`; `ACQUIRE_FRAME2` then returns
 each frame together with its EOTF, static metadata and full-range flag, which is
-what lets Hermes 0.6.0 put 10-bit PQ/BT.2020 HEVC Main10 or AV1 into the stream.
+what lets Hermes 0.6.0+ put 10-bit PQ/BT.2020 HEVC Main10 or AV1 into the stream.
 `color_depth=10` is the scanout half of the same switch — the module flags that
 pairing as untested, so validate it before deploying.
 
@@ -138,13 +142,13 @@ Two things still gate it:
   the stream SDR no matter how the module is loaded. sway does have one
   (`output <name> hdr on`, sway ≥ 1.12: BT2020 primaries + PQ, implies a 10-bit
   render surface), which is what this image uses, and
-- the module and the container must be the matching pair (0.4.0 ↔ Hermes 0.6.0,
+- the module and the container must be the matching pair (≥ 0.4.0 ↔ Hermes ≥ 0.6.0,
   UAPI 14) — a 0.3.x module has no `hdr_enable` at all and UAPI 9 without the
   colour metadata.
 
 So HDR needs exactly two things:
 
-- Hermes-KMS **0.4.0** loaded with `hdr_enable=1 color_depth=10` (the module flags
+- Hermes-KMS **0.4.1** (or 0.4.0) loaded with `hdr_enable=1 color_depth=10` (the module flags
   that pairing as untested — validate it), and
 - a Moonlight client that asked for HDR.
 
@@ -248,6 +252,49 @@ dies with `trap divide error ... in libGLX_mesa.so.0.0.0`: the client hears Stea
 start, sees nothing, and only gets a picture after Steam relaunches. Parking it at
 `999999,0` is equally bad — that makes the X screen a million pixels wide.
 
+### Clipboard FD leak prevention & port 47999 hardening
+
+A subtle but critical failure mode on Linux game streaming hosts involves clipboard
+synchronization: utilities like `wl-copy`, `wl-paste`, and `xclip` fork into
+background daemon processes to serve clipboard selections to other applications.
+
+* **The Problem:** In Linux, child processes inherit all open file descriptors from
+  their parent unless explicitly flagged with `O_CLOEXEC`. When Hermes invokes a
+  clipboard command, the resulting background daemon inherits Hermes' active network
+  sockets — most critically the **ENet UDP 47999** socket used for client
+  connection control and streaming handshakes. When the streaming session ends and
+  Hermes shuts down or attempts to re-bind port 47999 for the next stream, the
+  leaked background daemon continues holding the socket in the kernel. Subsequent
+  connection attempts then immediately fail with:
+  ```
+  Couldn't create an ENet host on [:::47999]; the port is most likely already in use.
+  ```
+  causing Moonlight/Artemis clients to fail with **RTSP handshake error 500**.
+* **Binary FD-sanitizing wrappers:** The image moves the real binaries to
+  `/usr/bin/{wl-copy,wl-paste,xclip}.real` and replaces them with shell wrappers
+  (mirrored in `/usr/local/bin`). Before `exec`ing the real binary, each wrapper
+  inspects `/proc/self/fd` and systematically closes every inherited file
+  descriptor `>= 3` (standard input, output, and error are preserved; all leaked
+  sockets are severed).
+* **Multi-tier automatic lifecycle reaping:**
+  - `hermes-steam-session`: Traps `EXIT INT TERM` to proactively kill any
+    background `wl-copy`, `wl-paste`, and `xclip` processes when a session ends,
+    and terminates residual `steam` user processes so GPU/VRAM resources are
+    instantly reclaimed.
+  - `hermes-focus-watch`: When `Virtual-1` unplugs and the session transitions to
+    idle, background clipboard daemons are reaped automatically.
+  - `entrypoint.sh`: Verifies UDP 47999 availability prior to launching Hermes and
+    clears any rogue clipboard processes if an unexpected conflict is detected.
+* **One-shot host hotfix script (`scripts/patch-clipboard-leak.sh`):**
+  If you have an existing running container and encounter a locked port 47999 or
+  RTSP 500 without wanting to recreate the container or rebuild the image:
+  ```bash
+  sudo ./scripts/patch-clipboard-leak.sh [CONTAINER_NAME]
+  ```
+  The script clears conflicting host/container clipboard daemons, frees UDP 47999,
+  diverts the real binaries, and applies the FD-sanitizing wrappers live to the
+  running container.
+
 ## X11 and `network_mode: host`
 
 The abstract X11 namespace (`@/tmp/.X11-unix/X<n>`) follows the **network**
@@ -342,7 +389,7 @@ docker build -t hermes-sunshine:latest \
 
 The bundled **GitHub Actions** workflow
 ([`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml))
-builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`) and **Docker Hub** (`sovlookup/hermes-sunshine`):
+builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`) and **Docker Hub** (`gonorth/hermes-sunshine`):
 
 ```bash
 # Pull from GHCR
@@ -350,8 +397,8 @@ docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
 docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.7.0   # pinned to a Hermes release
 
 # Pull from Docker Hub
-docker pull sovlookup/hermes-sunshine:latest                  # newest build
-docker pull sovlookup/hermes-sunshine:hermes-v0.7.0           # pinned to a Hermes release
+docker pull gonorth/hermes-sunshine:latest                    # newest build
+docker pull gonorth/hermes-sunshine:hermes-v0.7.0             # pinned to a Hermes release
 
 # China: use the Nanjing University GHCR mirror for a faster pull
 docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
@@ -444,6 +491,19 @@ How it works and what to know:
   disk there.
 - **Controllers.** Gamepad input arrives through the virtual `/dev/uinput` device
   (already mapped in the compose file) exactly like the streaming input path.
+- **Clean exit & session lifecycle teardown.** When you exit Steam or choose power off
+  from the Big Picture UI, the session terminates cleanly instead of restarting in an
+  infinite loop. `hermes-steam-session` exits immediately with Steam's return code,
+  prompting Hermes to unplug `Virtual-1` and disconnect the client stream. An
+  `EXIT INT TERM` trap automatically sweeps residual game processes under the `steam`
+  user (`pkill -9 -u steam`) and terminates lingering clipboard daemons, immediately
+  reclaiming GPU memory, VRAM, and audio resources for subsequent connections.
+- **Multi-GPU & DRI Prime offload (`RENDER_NODE` & `DRI_PRIME`).** On systems with
+  multiple GPUs or hybrid APU + dGPU configurations, you can set `RENDER_NODE` (e.g.
+  `/dev/dri/renderD128` or `128`) to designate which GPU drives Wayland compositing
+  and video encoding. The launcher automatically forwards `DRI_PRIME=1` to the Steam
+  environment, guaranteeing that Mesa/RADV offloads 3D rendering directly to the
+  discrete GPU.
 
 > **Host prerequisite: user namespaces.** Steam's container runtime
 > (`pressure-vessel` / `bubblewrap`) creates a nested user + mount namespace and
@@ -471,21 +531,25 @@ denied`.
 
 ## Runtime environment variables
 
-| Variable           | Default                 | Description                                                                                                                                                                     |
-| ------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TZ`               | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                 |
-| `HERMES_KMS`       | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                         |
-| `DISPLAY_WIDTH`    | `1920`                  | Virtual output width.                                                                                                                                                           |
-| `DISPLAY_HEIGHT`   | `1080`                  | Virtual output height.                                                                                                                                                          |
-| `DISPLAY_REFRESH`  | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                               |
-| `START_COMPOSITOR` | `true`                  | Start the Wayland session (sway).                                                                                                                                                                           |
-| `START_PIPEWIRE`   | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) for audio capture. Hermes creates and captures its own loopback sink.                                                           |
-| `START_AVAHI`      | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
-| `ENABLE_XWAYLAND`  | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
-| `AUTOSTART_STEAM`  | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered (the shipped list then contains no apps at all). |
-| `STEAM_GAMESCOPE`  | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
-| `WLR_RENDERER`     | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
-| `HERMES_CONFIG`    | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
+| Variable                       | Default                 | Description                                                                                                                                                                     |
+| ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TZ`                           | _(host)_                | Timezone. Unset by default: the container follows the bind-mounted host `/etc/localtime`. Set e.g. `Asia/Shanghai` to override.                                                 |
+| `HERMES_KMS`                   | `auto`                  | Virtual display source: `auto`/`on`/`off` (host Hermes-KMS card vs. headless fallback).                                                                                         |
+| `RENDER_NODE`                  | `auto`                  | Dedicated GPU render/encode node (e.g. `/dev/dri/renderD128` or `128`). Automatically updates Hermes `adapter_name` and sets `WLR_RENDER_DRM_DEVICE`. Ideal for multi-GPU setups. |
+| `ADDRESS_FAMILY`               | `both`                  | Network IP stack binding: `both`, `ipv4`, or `ipv6`. Use `ipv4` if host encounters IPv6 or dual-stack port binding conflicts.                                                 |
+| `IGNORE_ENCODER_PROBE_FAILURE` | `disabled`              | Set `enabled` (or `true`) to bypass synthetic capture and encoder probe checks on unusual or purely headless setups.                                                           |
+| `DRI_PRIME`                    | `1` (if multi-GPU)      | Controls DRI PRIME GPU offloading injected into the Steam Big Picture session.                                                                                                 |
+| `DISPLAY_WIDTH`                | `1920`                  | Virtual output width.                                                                                                                                                           |
+| `DISPLAY_HEIGHT`               | `1080`                  | Virtual output height.                                                                                                                                                          |
+| `DISPLAY_REFRESH`              | `60`                    | Virtual output refresh rate (Hz).                                                                                                                                               |
+| `START_COMPOSITOR`             | `true`                  | Start the Wayland session (sway).                                                                                                                                               |
+| `START_PIPEWIRE`               | `true`                  | Start PipeWire (+ WirePlumber + pipewire-pulse) for audio capture. Hermes creates and captures its own loopback sink.                                                           |
+| `START_AVAHI`                  | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
+| `ENABLE_XWAYLAND`              | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
+| `AUTOSTART_STEAM`              | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered (the shipped list then contains no apps at all). |
+| `STEAM_GAMESCOPE`              | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
+| `WLR_RENDERER`                 | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
+| `HERMES_CONFIG`                | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
 
 The virtual output resolution is set at runtime from `DISPLAY_WIDTH`/`HEIGHT`/
 `REFRESH`. Drop extra sway snippets into `./config/sway.d/*.conf` on the host to
@@ -532,6 +596,12 @@ when host networking is unavailable.
   `nvidia` runtime block in `docker-compose.yml`. NVENC availability depends on
   whether the prebuilt Hermes package was compiled with CUDA support upstream;
   Hermes-KMS's NVENC/AMF path is not yet validated upstream.
+- **Multi-GPU & Render node selection:** When both an integrated GPU (APU/iGPU) and
+  a discrete GPU are present (e.g. `/dev/dri/renderD128` and `/dev/dri/renderD129`),
+  the container logs all available DRM render drivers on boot. Set
+  `RENDER_NODE=/dev/dri/renderD128` (or `RENDER_NODE=128`) in `docker-compose.yml` to
+  explicitly pin the high-performance GPU for sway composition and Hermes hardware
+  encoding.
 
 ## Notes & limitations
 
@@ -549,15 +619,24 @@ initial_enabled=0`); it cannot be loaded from inside a container. sway (in the
 - **Real GPU still needed.** Hermes-KMS is not a render GPU — rendering and
   encoding run on a real GPU that imports the exported DMA-BUFs, so `/dev/dri`
   must be passed through.
+- **Clipboard sync & UDP 47999 isolation:** Clipboard sync works out of the box
+  (`wl-clipboard` + `xclip` are preinstalled). To prevent background clipboard
+  daemons from locking ENet UDP 47999 (which triggers RTSP 500 on reconnects),
+  the image enforces FD isolation and automatic session cleanup. On running
+  containers, `sudo ./scripts/patch-clipboard-leak.sh` can be used to apply a
+  live hotfix.
 - **EVDI warning is harmless.** EVDI is a _separate_ virtual-display backend
   (DisplayLink-derived) that Hermes probes at startup. This image uses the
   Hermes-KMS path instead, so the "EVDI userspace library is missing" notice in
   the UI is expected and can be ignored. The `evdi` package is AUR-only and its
   kernel module would have to be loaded on the host in place of `hermes_kms`, so
-  it is intentionally not bundled. Clipboard sync, however, works out of the box
-  (`wl-clipboard` + `xclip` are preinstalled).
+  it is intentionally not bundled.
 - **Root & SYS_ADMIN.** The container runs as root and requests `SYS_ADMIN` so it
   can capture the display and inject input. Treat it like any privileged
   streaming host and keep it on a trusted network / behind a firewall.
+- **Image footprint & optimization:** The image is tuned for compact deployment
+  on CachyOS with minimal layer overhead, optimized font packages (`wqy-zenhei`
+  and `noto-fonts`), and aggressive cache cleanup while retaining full Steam Big
+  Picture and 32-bit gaming runtimes.
 - **Config files** written under `/config` are owned by root (the container's
   user); `chown` them on the host if you need non-root ownership there.
