@@ -342,15 +342,22 @@ docker build -t hermes-sunshine:latest \
 
 The bundled **GitHub Actions** workflow
 ([`.github/workflows/docker-build.yml`](.github/workflows/docker-build.yml))
-builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`):
+builds and pushes images to **GHCR** (`ghcr.io/sovlookup/hermes-sunshine`) and **Docker Hub** (`sovlookup/hermes-sunshine`):
 
 ```bash
+# Pull from GHCR
 docker pull ghcr.io/sovlookup/hermes-sunshine:latest          # newest build
-docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.4.0   # pinned to a Hermes release
+docker pull ghcr.io/sovlookup/hermes-sunshine:hermes-v0.7.0   # pinned to a Hermes release
+
+# Pull from Docker Hub
+docker pull sovlookup/hermes-sunshine:latest                  # newest build
+docker pull sovlookup/hermes-sunshine:hermes-v0.7.0           # pinned to a Hermes release
 
 # China: use the Nanjing University GHCR mirror for a faster pull
 docker pull ghcr.nju.edu.cn/sovlookup/hermes-sunshine:latest
 ```
+
+> **Note on Docker Hub push**: GHCR push uses the automatic `GITHUB_TOKEN`. To enable Docker Hub push from the GitHub Actions workflow, add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub Personal Access Token with Read & Write access) to your repository's GitHub Secrets. If the secrets are omitted, the workflow will log a notice and push to GHCR only without failing.
 
 Each build publishes a single image (tags `latest` and `hermes-<tag>`) that boots
 straight into **Steam Big Picture** (see below).

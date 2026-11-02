@@ -7,8 +7,9 @@ name: Build & publish Docker image
 # Besides the usual push/PR CI, a daily schedule follows upstream Hermes
 # releases (https://github.com/MrOz59/Hermes): it resolves the latest release
 # tag and, if no image has been published for it yet, builds + pushes one tagged
-# `hermes-<tag>` and updates `latest`. Trigger a specific build by hand from the
-# Actions tab (workflow_dispatch) with an optional tag / force flag.
+# `hermes-<tag>` and updates `latest` to both GHCR and Docker Hub.
+# Trigger a specific build by hand from the Actions tab (workflow_dispatch)
+# with an optional tag / force flag.
 
 on:
   push:
@@ -115,11 +116,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Configure target registries
+        id: registries
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD || secrets.DOCKER_PASSWORD || secrets.DOCKER_TOKEN }}
+          DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO || vars.DOCKERHUB_REPO || 'sovlookup/hermes-sunshine' }}
+        run: |
+          images="ghcr.io/${{ env.IMAGE_NAME }}"
+          if [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "dockerhub_enabled=true" >> "$GITHUB_OUTPUT"
+            images="${images}"$'\n'"${DOCKERHUB_REPO}"
+            echo "Docker Hub push enabled for: ${DOCKERHUB_REPO}"
+          else
+            echo "dockerhub_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docker Hub credentials not configured; skipping Docker Hub push. To enable, configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets in repository settings."
+          fi
+          {
+            echo "images<<EOF"
+            echo "${images}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && steps.registries.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || secrets.DOCKER_USERNAME || 'sovlookup' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD || secrets.DOCKER_PASSWORD || secrets.DOCKER_TOKEN }}
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ env.IMAGE_NAME }}
+          images: ${{ steps.registries.outputs.images }}
           tags: |
             type=raw,value=hermes-${{ needs.resolve.outputs.hermes_ref }}
             type=ref,event=branch
