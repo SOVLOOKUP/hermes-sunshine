@@ -1211,7 +1211,7 @@ fi
 ensure_clipboard_wrappers() {
     local bin
     for bin in wl-copy wl-paste xclip; do
-        if [ -f "/usr/bin/${bin}" ] && [ ! -f "/usr/bin/${bin}.real" ]; then
+        if [ -f "/usr/bin/${bin}" ]; then
             if ! grep -q "/proc/self/fd" "/usr/bin/${bin}" 2>/dev/null; then
                 mv -f "/usr/bin/${bin}" "/usr/bin/${bin}.real" 2>/dev/null || true
                 if [ -f "/usr/local/bin/${bin}" ]; then

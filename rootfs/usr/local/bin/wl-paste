@@ -6,10 +6,9 @@ for fd in /proc/self/fd/*; do
         eval "exec $f>&-" 2>/dev/null || true
     fi
 done
-if [ -x /usr/bin/wl-paste.real ]; then
-    exec /usr/bin/wl-paste.real "$@"
-fi
-if [ -x /usr/bin/wl-paste ]; then
-    exec /usr/bin/wl-paste "$@"
-fi
+for real in /usr/bin/wl-paste.real /usr/local/bin/wl-paste.real; do
+    if [ -x "$real" ]; then
+        exec "$real" "$@"
+    fi
+done
 exit 0
