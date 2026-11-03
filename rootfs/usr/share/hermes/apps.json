@@ -10,8 +10,8 @@
       "allow-client-commands": false,
       "prep-cmd": [
         {
-          "do": "/usr/local/bin/hermes-hdr-match",
-          "undo": ""
+          "do": "/usr/local/bin/hermes-hdr-match do",
+          "undo": "/usr/local/bin/hermes-hdr-match undo"
         }
       ],
       "cmd": "/usr/local/bin/hermes-steam-session"

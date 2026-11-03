@@ -3,7 +3,7 @@
 # Invoked by Hermes as a prep-cmd before display capture initializes.
 set -euo pipefail
 
-hdr_req="${HERMES_CLIENT_HDR:-${SUNSHINE_CLIENT_HDR:-false}}"
+action="${1:-do}"
 
 if [ -z "${SWAYSOCK:-}" ] || [ ! -S "${SWAYSOCK}" ]; then
     SWAYSOCK="$(find /run/hermes /tmp/runtime "${XDG_RUNTIME_DIR:-/tmp/runtime}" /run/user/* -maxdepth 1 \( -name 'sway.sock' -o -name 'sway-ipc.*.sock' \) 2>/dev/null | head -n1 || true)"
@@ -12,16 +12,33 @@ fi
 [ -n "${SWAYSOCK:-}" ] && [ -S "${SWAYSOCK}" ] || exit 0
 command -v swaymsg >/dev/null 2>&1 || exit 0
 
-case "${hdr_req}" in
-    1|true|TRUE|yes|YES)
-        # Client requested HDR: only turn on if kernel module supports it
-        if [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
+has_hdr_module() {
+    [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]
+}
+
+case "${action}" in
+    undo|--undo)
+        # Restore default preference (HDR) when streaming session ends
+        if has_hdr_module; then
             swaymsg output Virtual-1 hdr on 2>/dev/null || true
         fi
         ;;
-    *)
-        # Client requested SDR: force Virtual-1 to SDR so Hermes KMS capture succeeds
-        swaymsg output Virtual-1 hdr off 2>/dev/null || true
+    do|*)
+        hdr_req="${HERMES_CLIENT_HDR:-${SUNSHINE_CLIENT_HDR:-false}}"
+        case "${hdr_req}" in
+            1|true|TRUE|yes|YES)
+                # Client requested HDR: ensure Virtual-1 is in HDR mode
+                if has_hdr_module; then
+                    swaymsg output Virtual-1 hdr on 2>/dev/null || true
+                    sleep 0.1
+                fi
+                ;;
+            *)
+                # Client requested SDR: fallback Virtual-1 to SDR so Hermes KMS capture succeeds without 503 error
+                swaymsg output Virtual-1 hdr off 2>/dev/null || true
+                sleep 0.1
+                ;;
+        esac
         ;;
 esac
 
