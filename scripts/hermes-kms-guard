@@ -1,0 +1,951 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# scripts/hermes-kms-guard — runtime health wrapper for the Hermes-KMS host
+# kernel module (https://github.com/MrOz59/Hermes-KMS).
+#
+# Scope: this is an open-source operational wrapper. It does NOT re-implement
+# the driver build or installation — upstream already ships `make dkms-install`
+# / `make dkms-uninstall` and helper scripts, and this tool deliberately calls
+# those. It adds: a configurable source/ref/workdir, a safe rebuild that never
+# unloads a busy module, an unprivileged health check (module load state,
+# UAPI/version visibility, hdr_enable readability, Hermes render-node discovery
+# and read-only permissions), a bounded polling watcher, and jq-free JSON.
+#
+# It contains no product/business logic and no licensing or seat/session
+# concepts. It only observes and acts on the kernel module's runtime state.
+#
+# All sysfs/proc/device paths and external commands are overridable via the
+# GUARD_* environment variables so the test harness can run entirely against a
+# temporary fake tree without touching real modules.
+#
+# Exit codes are classified; see the EXIT CODES section in --help.
+# ==============================================================================
+
+set -euo pipefail
+umask 022
+
+readonly GUARD_VERSION="1.0.0"
+
+# --- classified exit codes ---------------------------------------------------
+readonly EX_OK=0
+readonly EX_USAGE=2
+readonly EX_NOT_ROOT=3
+readonly EX_UPSTREAM=4
+readonly EX_BUSY=5
+readonly EX_MODULE_MISSING=6
+readonly EX_RENDER_MISSING=7
+readonly EX_RENDER_PERM=8
+readonly EX_HDR_UNREADABLE=9
+readonly EX_UAPI_MISMATCH=10
+readonly EX_DEGRADED=20
+
+# --- configuration (env-overridable) ----------------------------------------
+DEFAULT_REPO="https://github.com/MrOz59/Hermes-KMS"
+DEFAULT_REF="v0.4.1"
+DEFAULT_WORKDIR="${TMPDIR:-/tmp}/hermes-kms-guard"
+
+REPO="${GUARD_REPO:-$DEFAULT_REPO}"
+REF="${GUARD_REF:-$DEFAULT_REF}"
+WORKDIR="${GUARD_WORKDIR:-$DEFAULT_WORKDIR}"
+SOURCE="${GUARD_SOURCE:-}"
+EXPECTED_UAPI="${GUARD_EXPECTED_UAPI:-}"
+STATE_DIR="${GUARD_STATE_DIR:-${TMPDIR:-/tmp}/hermes-kms-guard-state}"
+
+# Probed roots — overridable so the test harness can use a fake tree.
+SYS="${GUARD_SYSFS_ROOT:-/sys}"
+PROC_MODULES="${GUARD_PROC_MODULES:-/proc/modules}"
+DRI="${GUARD_DEV_DRI:-/dev/dri}"
+
+# Command-line toggles.
+JSON=0
+INTERVAL=30
+CYCLES=0
+DO_REBUILD=0
+NO_UNLOAD=0
+
+SRCDIR=""
+
+# --- health state (populated by collect_health) ------------------------------
+CHECKS=()
+WARNINGS=()
+ERRORS=()
+H_RENDER_NODES=()
+H_MODULE_LOADED=false
+H_DRIVER_VERSION=""
+H_VERSION_SOURCE=""
+H_UAPI=""
+H_UAPI_VISIBLE=false
+H_EXPECTED_UAPI=""
+H_HDR_PRESENT=false
+H_HDR_READABLE=false
+H_HDR_VALUE=""
+H_COLOR_DEPTH=""
+H_RENDER_FOUND=false
+H_RENDER_COUNT=0
+H_RENDER_PRIMARY=""
+H_STATUS="ok"
+H_EXIT=$EX_OK
+_err_min=""
+
+# --- logging -----------------------------------------------------------------
+if [[ -t 2 && -z ${NO_COLOR:-} ]]; then
+  C_RED=$'\033[31m'
+  C_YEL=$'\033[33m'
+  C_CYN=$'\033[36m'
+  C_RST=$'\033[0m'
+else
+  C_RED=""
+  C_YEL=""
+  C_CYN=""
+  C_RST=""
+fi
+
+info() { printf '%s[guard]%s %s\n' "$C_CYN" "$C_RST" "$*" >&2; }
+warn() { printf '%s[warn]%s %s\n' "$C_YEL" "$C_RST" "$*" >&2; }
+err()  { printf '%s[error]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; }
+die()  { local code="$1"; shift; err "$*"; exit "$code"; }
+version() { printf 'hermes-kms-guard %s\n' "$GUARD_VERSION"; }
+
+# --- small helpers -----------------------------------------------------------
+is_root() { [[ "$(id -u)" -eq 0 ]]; }
+
+require_root() {
+  if is_root; then
+    return 0
+  fi
+  # Testing hook only: lets the harness exercise the privileged code paths with
+  # fake commands. Never set this in a real deployment.
+  if [[ "${GUARD_TEST_ALLOW_NONROOT:-0}" == "1" ]]; then
+    return 0
+  fi
+  die "$EX_NOT_ROOT" "this operation requires root (run with sudo)"
+}
+
+json_escape() {
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+jstr() {
+  if [[ -z "${1:-}" ]]; then
+    printf 'null'
+  else
+    printf '"%s"' "$(json_escape "$1")"
+  fi
+}
+
+jbool() {
+  if [[ "${1:-false}" == "true" ]]; then printf 'true'; else printf 'false'; fi
+}
+
+jnum() {
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+expected_uapi() {
+  if [[ -n "$EXPECTED_UAPI" ]]; then
+    printf '%s' "$EXPECTED_UAPI"
+    return 0
+  fi
+  local v="${REF#v}"
+  case "$v" in
+    0.3.*) printf '9' ;;
+    0.4.*) printf '14' ;;
+    *)     printf '' ;;
+  esac
+}
+
+# --- upstream source resolution ---------------------------------------------
+# Sets SRCDIR on success. Returns non-zero (without exiting) on failure so
+# callers can decide whether that is fatal or falls back.
+resolve_source() {
+  if [[ -n "$SOURCE" ]]; then
+    if [[ -f "$SOURCE/Makefile" ]]; then
+      SRCDIR="$SOURCE"
+      info "using upstream source: $SRCDIR"
+      return 0
+    fi
+    warn "source '$SOURCE' does not contain a Makefile"
+    return 1
+  fi
+
+  mkdir -p "$WORKDIR" 2>/dev/null || true
+  local workdir_abs name dir ref_safe
+  workdir_abs="$(cd -- "$WORKDIR" 2>/dev/null && pwd -P)" || {
+    warn "could not resolve working directory '$WORKDIR'"
+    return 1
+  }
+  name="$(basename "$REPO")"
+  name="${name%.git}"
+  # The checkout path is derived from untrusted CLI/environment strings. Never
+  # interpolate a raw ref into a path passed to rm -rf: refs such as ../../x
+  # must not escape the verified working directory.
+  name="${name//[^A-Za-z0-9._-]/_}"
+  ref_safe="${REF//[^A-Za-z0-9._-]/_}"
+  [[ -n "$name" && "$name" != "." && "$name" != ".." ]] || name="Hermes-KMS"
+  [[ -n "$ref_safe" && "$ref_safe" != "." && "$ref_safe" != ".." ]] || ref_safe="unknown"
+  dir="$workdir_abs/$name-$ref_safe"
+  if [[ "$dir" != "$workdir_abs"/* || "$dir" == "$workdir_abs" ]]; then
+    warn "refusing unsafe checkout path"
+    return 1
+  fi
+
+  if [[ -f "$dir/Makefile" ]]; then
+    SRCDIR="$dir"
+    info "reusing source: $SRCDIR"
+    return 0
+  fi
+
+  if ! command -v git >/dev/null 2>&1; then
+    warn "git is required to fetch the upstream source (or pass --source DIR)"
+    return 1
+  fi
+
+  info "fetching $REPO @ $REF into $dir"
+  rm -rf -- "$dir"
+  if git clone --depth 1 --branch "$REF" "$REPO" "$dir" >/dev/null 2>&1; then
+    SRCDIR="$dir"
+    return 0
+  fi
+  # Fallback for a commit SHA that --branch cannot resolve.
+  if git clone "$REPO" "$dir" >/dev/null 2>&1 \
+       && git -C "$dir" checkout --quiet "$REF" >/dev/null 2>&1; then
+    SRCDIR="$dir"
+    return 0
+  fi
+  rm -rf -- "$dir"
+  warn "could not fetch $REPO @ $REF"
+  return 1
+}
+
+# --- low-level probes --------------------------------------------------------
+driver_for_render() {
+  local base="$1" link drv="" uevent
+  link="$SYS/class/drm/$base/device/driver"
+  if [[ -L "$link" ]]; then
+    drv="$(readlink -f "$link" 2>/dev/null || true)"
+    drv="${drv##*/}"
+  fi
+  if [[ -z "$drv" ]]; then
+    uevent="$SYS/class/drm/$base/device/uevent"
+    if [[ -r "$uevent" ]]; then
+      drv="$(sed -n 's/^DRIVER=//p' "$uevent" 2>/dev/null | head -n1 || true)"
+    fi
+  fi
+  printf '%s' "$drv"
+}
+
+role_for_render() {
+  local base="$1" dev role=""
+  dev="$(readlink -f "$SYS/class/drm/$base/device" 2>/dev/null || true)"
+  if [[ -n "$dev" && -r "$dev/hermes_kms_role" ]]; then
+    role="$(head -n1 "$dev/hermes_kms_role" 2>/dev/null || true)"
+  fi
+  printf '%s' "$role"
+}
+
+# "true" when a mode has no group/other write bits (read-only for consumers).
+node_readonly() {
+  local mode="$1"
+  if [[ ! "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf 'false'
+    return 0
+  fi
+  local m=$((8#$mode))
+  if (( (m & 8#022) == 0 )); then printf 'true'; else printf 'false'; fi
+}
+
+resolve_version() {
+  H_DRIVER_VERSION=""
+  H_VERSION_SOURCE=""
+  H_UAPI=""
+  H_UAPI_VISIBLE=false
+
+  if command -v hermes-kmsctl >/dev/null 2>&1; then
+    local out
+    out="$(hermes-kmsctl --verbose version 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+      H_UAPI="$(sed -n 's/^uapi_version=//p' <<<"$out" | head -n1 || true)"
+      H_DRIVER_VERSION="$(sed -n 's/^driver_version=//p' <<<"$out" | head -n1 || true)"
+      [[ -n "$H_UAPI" ]] && H_UAPI_VISIBLE=true
+      [[ -n "$H_DRIVER_VERSION" ]] && H_VERSION_SOURCE="hermes-kmsctl"
+    fi
+  fi
+
+  if [[ -z "$H_DRIVER_VERSION" ]] && command -v modinfo >/dev/null 2>&1; then
+    local mv
+    mv="$(modinfo -F version hermes_kms 2>/dev/null || true)"
+    if [[ -n "$mv" ]]; then
+      H_DRIVER_VERSION="$mv"
+      H_VERSION_SOURCE="modinfo"
+    fi
+  fi
+
+  if [[ -z "$H_DRIVER_VERSION" && -r "$SYS/module/hermes_kms/version" ]]; then
+    H_DRIVER_VERSION="$(cat "$SYS/module/hermes_kms/version" 2>/dev/null || true)"
+    [[ -n "$H_DRIVER_VERSION" ]] && H_VERSION_SOURCE="sysfs"
+  fi
+
+  if [[ -z "$H_DRIVER_VERSION" ]] && command -v dkms >/dev/null 2>&1; then
+    H_DRIVER_VERSION="$(dkms status 2>/dev/null \
+      | awk -F '[/,: ]+' '$1 == "hermes-kms" {print $2; exit}' || true)"
+    [[ -n "$H_DRIVER_VERSION" ]] && H_VERSION_SOURCE="dkms"
+  fi
+}
+
+module_busy() {
+  # Returns 0 (busy) or 1 (idle).
+  if [[ -r "$SYS/module/hermes_kms/refcnt" ]]; then
+    local r
+    r="$(cat "$SYS/module/hermes_kms/refcnt" 2>/dev/null || true)"
+    if [[ "$r" =~ ^[0-9]+$ ]] && (( r > 0 )); then
+      return 0
+    fi
+  fi
+  if command -v lsmod >/dev/null 2>&1; then
+    local u
+    u="$(lsmod 2>/dev/null | awk '$1 == "hermes_kms" {print $3; exit}' || true)"
+    if [[ -n "$u" && "$u" =~ ^[0-9]+$ ]] && (( u > 0 )); then
+      return 0
+    fi
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    local rec np
+    for rec in ${H_RENDER_NODES[@]+"${H_RENDER_NODES[@]}"}; do
+      np="${rec%%|*}"
+      if [[ -e "$np" ]] && fuser -s "$np" 2>/dev/null; then
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
+print_busy_holders() {
+  if command -v lsmod >/dev/null 2>&1; then
+    lsmod 2>/dev/null | awk 'NR == 1 || $1 == "hermes_kms"' >&2 || true
+  fi
+  local rec np
+  for rec in ${H_RENDER_NODES[@]+"${H_RENDER_NODES[@]}"}; do
+    np="${rec%%|*}"
+    if [[ -e "$np" ]] && command -v fuser >/dev/null 2>&1; then
+      fuser -v "$np" >&2 2>&1 || true
+    fi
+  done
+}
+
+# --- health collection -------------------------------------------------------
+add_check() { CHECKS+=("$1|$2|$3"); }
+add_warn()  { WARNINGS+=("$1: $2"); }
+add_error() {
+  ERRORS+=("$1: $2")
+  if [[ -z "$_err_min" || "$3" -lt "$_err_min" ]]; then
+    _err_min="$3"
+  fi
+}
+
+collect_health() {
+  CHECKS=()
+  WARNINGS=()
+  ERRORS=()
+  H_RENDER_NODES=()
+  _err_min=""
+
+  H_MODULE_LOADED=false
+  H_DRIVER_VERSION=""
+  H_VERSION_SOURCE=""
+  H_UAPI=""
+  H_UAPI_VISIBLE=false
+  H_EXPECTED_UAPI="$(expected_uapi)"
+  H_HDR_PRESENT=false
+  H_HDR_READABLE=false
+  H_HDR_VALUE=""
+  H_COLOR_DEPTH=""
+  H_RENDER_FOUND=false
+  H_RENDER_COUNT=0
+  H_RENDER_PRIMARY=""
+
+  if [[ -d "$SYS/module/hermes_kms" ]] \
+     || grep -q '^hermes_kms[[:space:]]' "$PROC_MODULES" 2>/dev/null; then
+    H_MODULE_LOADED=true
+    add_check module_loaded ok "hermes_kms is loaded"
+  else
+    add_check module_loaded error "hermes_kms is not loaded"
+    add_error module_loaded "module not loaded" "$EX_MODULE_MISSING"
+    H_STATUS="error"
+    H_EXIT=$EX_MODULE_MISSING
+    return 0
+  fi
+
+  # Version / UAPI visibility (best-effort; absence is a warning, not a failure).
+  resolve_version
+  if [[ -n "$H_DRIVER_VERSION" ]]; then
+    add_check driver_version ok "$H_DRIVER_VERSION (via $H_VERSION_SOURCE)"
+  else
+    add_check driver_version warn "driver version not visible"
+    add_warn driver_version "driver version could not be determined"
+  fi
+
+  if [[ "$H_UAPI_VISIBLE" == "true" ]]; then
+    if [[ -n "$H_EXPECTED_UAPI" && "$H_UAPI" != "$H_EXPECTED_UAPI" ]]; then
+      add_check uapi error "uapi $H_UAPI != expected $H_EXPECTED_UAPI"
+      add_error uapi "live UAPI $H_UAPI does not match expected $H_EXPECTED_UAPI" "$EX_UAPI_MISMATCH"
+    else
+      add_check uapi ok "uapi $H_UAPI"
+    fi
+  else
+    add_check uapi warn "UAPI version not visible (needs hermes-kmsctl or manual query)"
+    add_warn uapi "UAPI version not visible for the loaded module"
+  fi
+
+  # hdr_enable readability.
+  local hdr_param="$SYS/module/hermes_kms/parameters/hdr_enable"
+  local cd_param="$SYS/module/hermes_kms/parameters/color_depth"
+  if [[ -e "$hdr_param" ]]; then
+    H_HDR_PRESENT=true
+    if [[ -r "$hdr_param" ]]; then
+      H_HDR_READABLE=true
+      H_HDR_VALUE="$(cat "$hdr_param" 2>/dev/null || true)"
+      add_check hdr_enable ok "hdr_enable=$H_HDR_VALUE"
+    else
+      add_check hdr_enable error "hdr_enable exists but is not readable"
+      add_error hdr_enable "hdr_enable parameter is not readable" "$EX_HDR_UNREADABLE"
+    fi
+  else
+    add_check hdr_enable warn "hdr_enable not exposed by this module (pre-HDR?)"
+    add_warn hdr_enable "hdr_enable parameter not present"
+  fi
+  if [[ -r "$cd_param" ]]; then
+    H_COLOR_DEPTH="$(cat "$cd_param" 2>/dev/null || true)"
+  fi
+
+  # Hermes render-node discovery — never assume a fixed renderD number.
+  local p base drv node mode ro role
+  local -a bases=()
+  shopt -s nullglob
+  for p in "$SYS"/class/drm/renderD*; do
+    bases+=("${p##*/}")
+  done
+  shopt -u nullglob
+
+  if (( ${#bases[@]} > 0 )); then
+    while IFS= read -r base; do
+      drv="$(driver_for_render "$base")"
+      if [[ "$drv" =~ ^hermes[-_]kms$ ]]; then
+        node="$DRI/$base"
+        mode=""
+        if [[ -e "$node" ]]; then
+          mode="$(stat -c '%a' "$node" 2>/dev/null || true)"
+        fi
+        ro="$(node_readonly "$mode")"
+        role="$(role_for_render "$base")"
+        H_RENDER_NODES+=("$node|$drv|$mode|$ro|$role")
+        H_RENDER_COUNT=$((H_RENDER_COUNT + 1))
+        if [[ -z "$H_RENDER_PRIMARY" ]]; then
+          H_RENDER_PRIMARY="$node"
+        fi
+      fi
+    done < <(printf '%s\n' "${bases[@]}" | sort)
+  fi
+
+  if (( H_RENDER_COUNT == 0 )); then
+    H_RENDER_FOUND=false
+    add_check render_node error "no hermes-kms render node under $SYS/class/drm"
+    add_error render_node "no Hermes-KMS render node found" "$EX_RENDER_MISSING"
+  else
+    H_RENDER_FOUND=true
+    add_check render_node ok "$H_RENDER_COUNT node(s); primary $H_RENDER_PRIMARY"
+    local bad=0 rec nro
+    for rec in "${H_RENDER_NODES[@]}"; do
+      IFS='|' read -r _ _ _ nro _ <<<"$rec"
+      if [[ "$nro" != "true" ]]; then
+        bad=1
+      fi
+    done
+    if (( bad )); then
+      add_check render_perms error "a hermes-kms render node is group/other writable"
+      add_error render_perms "Hermes-KMS render node has writable permissions" "$EX_RENDER_PERM"
+    else
+      add_check render_perms ok "render nodes are read-only (no group/other write)"
+    fi
+  fi
+
+  if [[ -n "$_err_min" ]]; then
+    H_STATUS="error"
+    H_EXIT="$_err_min"
+  elif (( ${#WARNINGS[@]} > 0 )); then
+    H_STATUS="degraded"
+    H_EXIT=$EX_DEGRADED
+  else
+    H_STATUS="ok"
+    H_EXIT=$EX_OK
+  fi
+  return 0
+}
+
+# --- rendering ---------------------------------------------------------------
+print_status_json() {
+  local ts host first item id st det rec path drv mode ro role firstnode
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  host="$(hostname 2>/dev/null || echo unknown)"
+
+  printf '{\n'
+  printf '  "guard_version": %s,\n' "$(jstr "$GUARD_VERSION")"
+  printf '  "timestamp": %s,\n' "$(jstr "$ts")"
+  printf '  "host": %s,\n' "$(jstr "$host")"
+  printf '  "status": %s,\n' "$(jstr "$H_STATUS")"
+  printf '  "exit_code": %d,\n' "$H_EXIT"
+
+  printf '  "checks": ['
+  first=1
+  for item in ${CHECKS[@]+"${CHECKS[@]}"}; do
+    IFS='|' read -r id st det <<<"$item"
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    {"id": %s, "status": %s, "detail": %s}' \
+      "$(jstr "$id")" "$(jstr "$st")" "$(jstr "$det")"
+  done
+  if (( first )); then printf '],\n'; else printf '\n  ],\n'; fi
+
+  printf '  "module": {"loaded": %s, "name": "hermes_kms", "driver_version": %s, "version_source": %s},\n' \
+    "$(jbool "$H_MODULE_LOADED")" "$(jstr "$H_DRIVER_VERSION")" "$(jstr "$H_VERSION_SOURCE")"
+
+  printf '  "uapi": {"visible": %s, "version": %s, "expected": %s},\n' \
+    "$(jbool "$H_UAPI_VISIBLE")" "$(jnum "$H_UAPI")" "$(jnum "$H_EXPECTED_UAPI")"
+
+  printf '  "hdr": {"present": %s, "readable": %s, "hdr_enable": %s, "color_depth": %s},\n' \
+    "$(jbool "$H_HDR_PRESENT")" "$(jbool "$H_HDR_READABLE")" \
+    "$(jstr "$H_HDR_VALUE")" "$(jnum "$H_COLOR_DEPTH")"
+
+  printf '  "render": {"found": %s, "count": %d, "primary": %s, "nodes": [' \
+    "$(jbool "$H_RENDER_FOUND")" "$H_RENDER_COUNT" "$(jstr "$H_RENDER_PRIMARY")"
+  firstnode=1
+  for rec in ${H_RENDER_NODES[@]+"${H_RENDER_NODES[@]}"}; do
+    IFS='|' read -r path drv mode ro role <<<"$rec"
+    if (( firstnode )); then printf '\n'; firstnode=0; else printf ',\n'; fi
+    printf '    {"path": %s, "driver": %s, "mode": %s, "readonly": %s, "role": %s}' \
+      "$(jstr "$path")" "$(jstr "$drv")" "$(jstr "$mode")" "$(jbool "$ro")" "$(jstr "$role")"
+  done
+  if (( firstnode )); then printf ']},\n'; else printf '\n  ]},\n'; fi
+
+  printf '  "warnings": ['
+  first=1
+  for item in ${WARNINGS[@]+"${WARNINGS[@]}"}; do
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    %s' "$(jstr "$item")"
+  done
+  if (( first )); then printf '],\n'; else printf '\n  ],\n'; fi
+
+  printf '  "errors": ['
+  first=1
+  for item in ${ERRORS[@]+"${ERRORS[@]}"}; do
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    %s' "$(jstr "$item")"
+  done
+  if (( first )); then printf ']\n'; else printf '\n  ]\n'; fi
+
+  printf '}\n'
+}
+
+print_status_text() {
+  printf 'status: %s (exit %d)\n' "$H_STATUS" "$H_EXIT"
+  printf '  module: %s' "$H_MODULE_LOADED"
+  if [[ -n "$H_DRIVER_VERSION" ]]; then
+    printf ' version=%s (%s)' "$H_DRIVER_VERSION" "$H_VERSION_SOURCE"
+  fi
+  printf '\n'
+  if [[ "$H_UAPI_VISIBLE" == "true" ]]; then
+    printf '  uapi:   %s (expected %s)\n' "$H_UAPI" "${H_EXPECTED_UAPI:-unknown}"
+  else
+    printf '  uapi:   not visible (expected %s)\n' "${H_EXPECTED_UAPI:-unknown}"
+  fi
+  if [[ "$H_HDR_PRESENT" == "true" ]]; then
+    printf '  hdr:    hdr_enable=%s color_depth=%s\n' \
+      "${H_HDR_VALUE:-?}" "${H_COLOR_DEPTH:-?}"
+  else
+    printf '  hdr:    hdr_enable not exposed\n'
+  fi
+  if (( H_RENDER_COUNT > 0 )); then
+    local rec path drv mode ro role
+    for rec in "${H_RENDER_NODES[@]}"; do
+      IFS='|' read -r path drv mode ro role <<<"$rec"
+      printf '  render: %s driver=%s mode=%s readonly=%s%s\n' \
+        "$path" "$drv" "${mode:-?}" "$ro" "${role:+ role=$role}"
+    done
+  else
+    printf '  render: none\n'
+  fi
+  local item
+  for item in ${WARNINGS[@]+"${WARNINGS[@]}"}; do
+    printf '  warning: %s\n' "$item"
+  done
+  for item in ${ERRORS[@]+"${ERRORS[@]}"}; do
+    printf '  error:   %s\n' "$item"
+  done
+}
+
+print_verify_text() {
+  local item id st det tag
+  for item in ${CHECKS[@]+"${CHECKS[@]}"}; do
+    IFS='|' read -r id st det <<<"$item"
+    case "$st" in
+      ok)    tag="ok   " ;;
+      warn)  tag="warn " ;;
+      error) tag="ERROR" ;;
+      *)     tag="$st" ;;
+    esac
+    printf '[%s] %-16s %s\n' "$tag" "$id" "$det"
+  done
+  printf 'result: %s (exit %d)\n' "$H_STATUS" "$H_EXIT"
+}
+
+write_state() {
+  local dir="$STATE_DIR" tmp
+  mkdir -p "$dir" 2>/dev/null || true
+  if [[ ! -d "$dir" ]]; then
+    return 0
+  fi
+  tmp="$dir/.last-status.json.$$"
+  if print_status_json >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$dir/last-status.json" 2>/dev/null || true
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+
+# --- unload / rebuild primitives --------------------------------------------
+# Returns 0 on success, EX_BUSY if the module could not be unloaded.
+safe_unload() {
+  if [[ ! -d "$SYS/module/hermes_kms" ]] \
+     && ! grep -q '^hermes_kms[[:space:]]' "$PROC_MODULES" 2>/dev/null; then
+    return 0
+  fi
+  if module_busy; then
+    warn "hermes_kms is busy (in use); refusing to unload"
+    return "$EX_BUSY"
+  fi
+  if [[ -n "$SRCDIR" && -x "$SRCDIR/scripts/hermes-kms-unload" ]]; then
+    if "$SRCDIR/scripts/hermes-kms-unload" >&2; then
+      return 0
+    fi
+    return "$EX_BUSY"
+  fi
+  if modprobe -r hermes_kms 2>/dev/null; then
+    return 0
+  fi
+  if command -v rmmod >/dev/null 2>&1 && rmmod hermes_kms 2>/dev/null; then
+    return 0
+  fi
+  return "$EX_BUSY"
+}
+
+# Build + install via upstream, then reload. Never unloads a busy module.
+# Returns a classified exit code; does not exit the process.
+rebuild_once() {
+  if ! command -v make >/dev/null 2>&1; then
+    err "make is required to rebuild (upstream dkms-install)"
+    return "$EX_UPSTREAM"
+  fi
+  if ! command -v dkms >/dev/null 2>&1; then
+    err "dkms is required to rebuild"
+    return "$EX_UPSTREAM"
+  fi
+  if ! resolve_source; then
+    err "could not obtain upstream source"
+    return "$EX_UPSTREAM"
+  fi
+
+  collect_health
+  if [[ "$H_MODULE_LOADED" == "true" ]]; then
+    if module_busy; then
+      err "hermes_kms is busy; refusing to unload (rebuild aborted to protect a running stream)"
+      print_busy_holders
+      return "$EX_BUSY"
+    fi
+    info "module is loaded and idle; unloading before rebuild"
+    local urc=0
+    safe_unload || urc=$?
+    if (( urc != 0 )); then
+      err "could not unload hermes_kms safely; aborting rebuild"
+      return "$EX_BUSY"
+    fi
+  fi
+
+  info "running upstream 'make dkms-install' in $SRCDIR"
+  if ! make -C "$SRCDIR" dkms-install; then
+    err "upstream 'make dkms-install' failed"
+    return "$EX_UPSTREAM"
+  fi
+
+  info "loading rebuilt module"
+  if ! modprobe hermes_kms; then
+    err "modprobe hermes_kms failed after rebuild"
+    return "$EX_UPSTREAM"
+  fi
+
+  info "re-verifying rebuilt module"
+  collect_health
+  print_verify_text >&2
+  return "$H_EXIT"
+}
+
+fallback_dkms_remove() {
+  warn "no upstream source available; falling back to direct DKMS removal"
+  local vers v d
+  if command -v dkms >/dev/null 2>&1; then
+    vers="$(dkms status 2>/dev/null \
+      | awk -F '[/,: ]+' '$1 == "hermes-kms" {print $2}' | sort -u || true)"
+    for v in $vers; do
+      info "dkms remove -m hermes-kms -v $v --all"
+      dkms remove -m hermes-kms -v "$v" --all >&2 || true
+    done
+  fi
+  for d in /usr/src/hermes-kms-*; do
+    [[ -d "$d" ]] || continue
+    info "removing $d"
+    rm -rf -- "$d"
+  done
+}
+
+# --- commands ----------------------------------------------------------------
+cmd_install() {
+  require_root
+  if ! command -v make >/dev/null 2>&1; then
+    die "$EX_UPSTREAM" "make is required to install (upstream dkms-install)"
+  fi
+  if ! command -v dkms >/dev/null 2>&1; then
+    die "$EX_UPSTREAM" "dkms is required to install"
+  fi
+  if ! resolve_source; then
+    die "$EX_UPSTREAM" "could not obtain upstream source (set --repo/--ref or --source)"
+  fi
+  info "running upstream 'make dkms-install' in $SRCDIR"
+  if ! make -C "$SRCDIR" dkms-install; then
+    die "$EX_UPSTREAM" "upstream 'make dkms-install' failed"
+  fi
+  info "install finished via upstream dkms-install"
+  return 0
+}
+
+cmd_uninstall() {
+  require_root
+  if resolve_source; then
+    if ! command -v make >/dev/null 2>&1; then
+      die "$EX_UPSTREAM" "make is required to uninstall (upstream dkms-uninstall)"
+    fi
+    info "running upstream 'make dkms-uninstall' in $SRCDIR"
+    if ! make -C "$SRCDIR" dkms-uninstall; then
+      die "$EX_UPSTREAM" "upstream 'make dkms-uninstall' failed"
+    fi
+  else
+    fallback_dkms_remove
+  fi
+  if (( NO_UNLOAD == 0 )); then
+    collect_health
+    if [[ "$H_MODULE_LOADED" == "true" ]]; then
+      local rc=0
+      safe_unload || rc=$?
+      if (( rc != 0 )); then
+        warn "module is still loaded (busy); close streaming clients or reboot, then retry"
+        return "$EX_BUSY"
+      fi
+      info "module unloaded"
+    fi
+  fi
+  return 0
+}
+
+cmd_rebuild() {
+  require_root
+  local rc=0
+  rebuild_once || rc=$?
+  return "$rc"
+}
+
+cmd_status() {
+  collect_health
+  if (( JSON )); then print_status_json; else print_status_text; fi
+  return "$H_EXIT"
+}
+
+cmd_verify() {
+  collect_health
+  if (( JSON )); then print_status_json; else print_verify_text; fi
+  return "$H_EXIT"
+}
+
+cmd_watch() {
+  local cycle=0 rc=0 ts rb
+  while :; do
+    collect_health
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_state
+    if (( JSON )); then
+      print_status_json
+    else
+      printf '%s status=%s exit=%d\n' "$ts" "$H_STATUS" "$H_EXIT"
+    fi
+    rc="$H_EXIT"
+
+    if (( H_EXIT != 0 )); then
+      local e w
+      printf '%s[alert]%s health=%s exit=%d at %s\n' \
+        "$C_YEL" "$C_RST" "$H_STATUS" "$H_EXIT" "$ts" >&2
+      for e in ${ERRORS[@]+"${ERRORS[@]}"}; do printf '  error: %s\n' "$e" >&2; done
+      for w in ${WARNINGS[@]+"${WARNINGS[@]}"}; do printf '  warning: %s\n' "$w" >&2; done
+      printf '  remediation: run "%s status --json" to inspect; if the module is idle and unhealthy run "%s rebuild" as root\n' \
+        "$(basename "$0")" "$(basename "$0")" >&2
+
+      if (( DO_REBUILD )); then
+        if is_root || [[ "${GUARD_TEST_ALLOW_NONROOT:-0}" == "1" ]]; then
+          info "watch: attempting a safe rebuild"
+          rb=0
+          rebuild_once || rb=$?
+          if (( rb == 0 )); then
+            info "watch: rebuild recovered health"
+          else
+            warn "watch: rebuild failed (rc=$rb); preserving status"
+          fi
+        else
+          warn "watch: --rebuild needs root; skipping (status preserved)"
+        fi
+      fi
+    fi
+
+    cycle=$((cycle + 1))
+    if (( CYCLES > 0 && cycle >= CYCLES )); then
+      break
+    fi
+    sleep "$INTERVAL"
+  done
+  return "$rc"
+}
+
+# --- argument parsing & dispatch --------------------------------------------
+usage() {
+  cat <<EOF
+hermes-kms-guard ${GUARD_VERSION} — runtime health wrapper for the Hermes-KMS host kernel module
+
+USAGE
+  $(basename "$0") <command> [options]
+
+COMMANDS
+  install      Build and install the module via upstream 'make dkms-install'   (root)
+  uninstall    Remove the module via upstream 'make dkms-uninstall', then unload (root)
+  rebuild      Safely rebuild and reload; refuses to unload a busy module       (root)
+  verify       Check loaded module, UAPI/version, hdr_enable, render node & perms
+  watch        Bounded polling health monitor; optional safe rebuild on failure
+  status       Print current health; add --json for machine-readable output
+  version      Print the wrapper version
+  help         Show this help
+
+OPTIONS
+  --repo URL        Upstream git repository   (env GUARD_REPO,    default ${DEFAULT_REPO})
+  --ref REF         Upstream ref/tag/commit   (env GUARD_REF,     default ${DEFAULT_REF})
+  --workdir DIR     Checkout working directory (env GUARD_WORKDIR, default ${DEFAULT_WORKDIR})
+  --source DIR      Use an existing checkout instead of cloning (env GUARD_SOURCE)
+  --expected-uapi N Expected UAPI version (env GUARD_EXPECTED_UAPI; default derived from --ref)
+  --json            Machine-readable JSON output (status, verify)
+  --interval SEC    watch poll interval in seconds (default 30)
+  --cycles N        watch polls before exit; 0 = until interrupted (default 0)
+  --rebuild         watch: attempt a safe rebuild when unhealthy (needs root)
+  --no-unload       uninstall: remove the DKMS registration but leave the module loaded
+  -h, --help        Show this help
+  --version         Print the wrapper version
+
+EXIT CODES
+  0  healthy / success        1  unexpected error        2  usage error
+  3  root required            4  upstream fetch/build    5  module busy
+  6  module not loaded        7  no render node          8  render node writable
+  9  hdr_enable unreadable    10 UAPI mismatch           20 degraded (warnings only)
+
+Upstream ships 'make dkms-install' / 'make dkms-uninstall' plus helper scripts; this
+wrapper calls those instead of reimplementing installation. Additional upstream
+post-install helpers are intentionally left to upstream and not re-implemented here.
+EOF
+}
+
+parse_int() {
+  # parse_int FLAGNAME VALUE
+  if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+    die "$EX_USAGE" "$1 expects a non-negative integer, got '$2'"
+  fi
+}
+
+parse_all() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--repo needs a value"
+        REPO="$2"; shift 2 ;;
+      --ref)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--ref needs a value"
+        REF="$2"; shift 2 ;;
+      --workdir)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--workdir needs a value"
+        WORKDIR="$2"; shift 2 ;;
+      --source)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--source needs a value"
+        SOURCE="$2"; shift 2 ;;
+      --expected-uapi)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--expected-uapi needs a value"
+        parse_int "--expected-uapi" "$2"
+        EXPECTED_UAPI="$2"; shift 2 ;;
+      --json)
+        JSON=1; shift ;;
+      --interval)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--interval needs a value"
+        parse_int "--interval" "$2"
+        INTERVAL="$2"; shift 2 ;;
+      --cycles)
+        [[ $# -ge 2 ]] || die "$EX_USAGE" "--cycles needs a value"
+        parse_int "--cycles" "$2"
+        CYCLES="$2"; shift 2 ;;
+      --rebuild)
+        DO_REBUILD=1; shift ;;
+      --no-unload)
+        NO_UNLOAD=1; shift ;;
+      -h|--help)
+        usage; exit 0 ;;
+      --version)
+        version; exit 0 ;;
+      *)
+        die "$EX_USAGE" "unknown option: $1 (see --help)" ;;
+    esac
+  done
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ -z "$cmd" ]]; then
+    usage
+    exit "$EX_USAGE"
+  fi
+  shift
+
+  case "$cmd" in
+    help|-h|--help)
+      usage; exit 0 ;;
+    version|--version)
+      version; exit 0 ;;
+    install|uninstall|verify|rebuild|watch|status)
+      parse_all "$@" ;;
+    *)
+      die "$EX_USAGE" "unknown command: $cmd (see --help)" ;;
+  esac
+
+  case "$cmd" in
+    install)   cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    verify)    cmd_verify ;;
+    rebuild)   cmd_rebuild ;;
+    watch)     cmd_watch ;;
+    status)    cmd_status ;;
+  esac
+}
+
+main "$@"
