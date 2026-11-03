@@ -353,7 +353,12 @@ launch_sway() {
             [ -n "${SWAYSOCK}" ] && break
             sleep 0.1
         done
-        [ -n "${SWAYSOCK}" ] && export SWAYSOCK
+        if [ -n "${SWAYSOCK}" ]; then
+            export SWAYSOCK
+            mkdir -p /run/hermes
+            ln -sf "${SWAYSOCK}" /run/hermes/sway.sock
+            chmod 777 "${SWAYSOCK}" /run/hermes/sway.sock 2>/dev/null || true
+        fi
         return 0
     fi
     kill "${pid}" 2>/dev/null || true
@@ -593,24 +598,26 @@ start_compositor() {
     # and sway >= 1.12 sets BT2020/PQ on top of that. Keep the directive out of
     # the config otherwise, so an SDR module is never asked for HDR.
     local hdr_on="false"
-    case "${ENABLE_HDR:-auto}" in
+    case "${ENABLE_HDR:-false}" in
         true|1|yes)
-            hdr_on="true"
-            ;;
-        false|0|no)
-            hdr_on="false"
-            ;;
-        *)
             if [ "${use_kms}" = "true" ] && [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
                 hdr_on="true"
+                log "HDR: enabled on Virtual-1 in sway (ENABLE_HDR=true)"
+            else
+                warn "ENABLE_HDR=true requested, but hermes_kms kernel module is not loaded with hdr_enable=Y"
             fi
             ;;
+        auto)
+            # Default to SDR in auto mode because Hermes 0.7.0 KMS zero-copy refuses
+            # physical-display fallback and aborts stream (503) if display is HDR but client is SDR.
+            hdr_on="false"
+            log "HDR: disabled by default in auto mode (set ENABLE_HDR=true to enable HDR)"
+            ;;
+        *)
+            hdr_on="false"
+            log "HDR: disabled (ENABLE_HDR=${ENABLE_HDR:-false})"
+            ;;
     esac
-    if [ "${hdr_on}" = "true" ]; then
-        log "HDR: Hermes-KMS is in HDR mode; enabling HDR on Virtual-1 in sway"
-    else
-        log "HDR: disabled (ENABLE_HDR=${ENABLE_HDR:-auto})"
-    fi
     write_sway_config "${hdr_on}"
 
     reserve_foreign_x_displays

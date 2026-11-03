@@ -5,8 +5,11 @@ set -euo pipefail
 
 hdr_req="${HERMES_CLIENT_HDR:-${SUNSHINE_CLIENT_HDR:-false}}"
 
-export SWAYSOCK="${SWAYSOCK:-/run/hermes/sway.sock}"
-[ -S "${SWAYSOCK}" ] || exit 0
+if [ -z "${SWAYSOCK:-}" ] || [ ! -S "${SWAYSOCK}" ]; then
+    SWAYSOCK="$(find /run/hermes /tmp/runtime "${XDG_RUNTIME_DIR:-/tmp/runtime}" /run/user/* -maxdepth 1 \( -name 'sway.sock' -o -name 'sway-ipc.*.sock' \) 2>/dev/null | head -n1 || true)"
+    export SWAYSOCK
+fi
+[ -n "${SWAYSOCK:-}" ] && [ -S "${SWAYSOCK}" ] || exit 0
 command -v swaymsg >/dev/null 2>&1 || exit 0
 
 case "${hdr_req}" in
