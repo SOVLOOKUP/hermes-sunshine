@@ -1048,9 +1048,21 @@ seed_config() {
     if [ -n "${RENDER_NODE:-}" ]; then
         set_conf_key adapter_name "${RENDER_NODE}"
     fi
-    if [ "${IGNORE_ENCODER_PROBE_FAILURE:-disabled}" = "enabled" ] || [ "${IGNORE_ENCODER_PROBE_FAILURE:-false}" = "true" ]; then
-        set_conf_key ignore_encoder_probe_failure enabled
-    fi
+    # Hermes 0.7.0 PR #93 added check_capture_path() before session start, which probes
+    # capture using a dummy H.264 SDR config (dynamicRange=0). When Hermes-KMS HDR is
+    # active, this dummy SDR probe fails against the HDR display ("Hermes-KMS output is
+    # HDR but the client requested SDR") and aborts the stream with 503 unless
+    # ignore_encoder_probe_failure is enabled. We enable it by default so HDR clients can stream.
+    local probe_fail_policy="${IGNORE_ENCODER_PROBE_FAILURE:-enabled}"
+    case "${probe_fail_policy}" in
+        enabled|true|1|yes)
+            set_conf_key ignore_encoder_probe_failure enabled
+            log "encoder probe / capture readiness fallback enabled (bypasses Hermes 0.7.0 PR #93 SDR dummy check)"
+            ;;
+        disabled|false|0|no)
+            set_conf_key ignore_encoder_probe_failure disabled
+            ;;
+    esac
     if [ -n "${SUNSHINE_NAME:-${SERVER_NAME:-}}" ]; then
         set_conf_key sunshine_name "${SUNSHINE_NAME:-${SERVER_NAME}}"
     fi

@@ -74,13 +74,28 @@ docker cp "${ROOT_DIR}/rootfs/usr/local/bin/xclip" "${CONTAINER_NAME}:/usr/local
 
 docker cp "${ROOT_DIR}/rootfs/usr/local/bin/hermes-steam-session" "${CONTAINER_NAME}:/usr/local/bin/hermes-steam-session"
 docker cp "${ROOT_DIR}/rootfs/usr/local/bin/hermes-focus-watch" "${CONTAINER_NAME}:/usr/local/bin/hermes-focus-watch"
+docker cp "${ROOT_DIR}/rootfs/usr/local/bin/hermes-hdr-match" "${CONTAINER_NAME}:/usr/local/bin/hermes-hdr-match"
 docker cp "${ROOT_DIR}/rootfs/usr/local/bin/entrypoint.sh" "${CONTAINER_NAME}:/usr/local/bin/entrypoint.sh"
 
 docker exec -u root "${CONTAINER_NAME}" chmod +x \
     /usr/bin/wl-copy /usr/bin/wl-paste /usr/bin/xclip \
     /usr/local/bin/wl-copy /usr/local/bin/wl-paste /usr/local/bin/xclip \
     /usr/local/bin/hermes-steam-session /usr/local/bin/hermes-focus-watch \
-    /usr/local/bin/entrypoint.sh
+    /usr/local/bin/hermes-hdr-match /usr/local/bin/entrypoint.sh
+
+# Ensure ignore_encoder_probe_failure = enabled in hermes.conf so Hermes 0.7.0 PR #93
+# capture readiness check does not abort HDR streaming with 503
+docker exec -u root "${CONTAINER_NAME}" bash -c '
+    for conf in /config/hermes.conf /config/sunshine.conf; do
+        if [ -f "${conf}" ]; then
+            if grep -qE "^[[:space:]]*ignore_encoder_probe_failure" "${conf}"; then
+                sed -i "s|^[[:space:]]*ignore_encoder_probe_failure.*|ignore_encoder_probe_failure = enabled|" "${conf}"
+            else
+                echo "ignore_encoder_probe_failure = enabled" >> "${conf}"
+            fi
+        fi
+    done
+'
 
 # Ensure Hermes-KMS render node is strictly read-only (0644) inside the live container
 docker exec -u root "${CONTAINER_NAME}" bash -c '

@@ -98,7 +98,7 @@ services:
     #   PORT: "47989"            # base port (default 47989, web UI at PORT+1 = 47990)
     #   ADDRESS_FAMILY: both     # both | ipv4 | ipv6 (set to ipv4 if host has IPv6/dual-stack port collision)
     #   ENABLE_HDR: auto         # auto (default: prefer HDR if module supports it, auto fallback to SDR) | true | false
-    #   IGNORE_ENCODER_PROBE_FAILURE: disabled # enabled | disabled (bypass synthetic capture check on unusual headless setups)
+    #   IGNORE_ENCODER_PROBE_FAILURE: enabled # enabled (default in 0.7.0: bypass synthetic SDR capture check on HDR) | disabled
     #   DISPLAY_WIDTH: "1920"
     #   DISPLAY_HEIGHT: "1080"
     #   DISPLAY_REFRESH: "60"
