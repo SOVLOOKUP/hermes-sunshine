@@ -1,0 +1,293 @@
+#!/bin/sh
+# Register $HERMES_GAMES_DIR as a Steam library folder before Steam launches.
+#
+# Contract: the host may bind-mount a shared games directory into the container
+# and export its container path via HERMES_GAMES_DIR (e.g. /games). When set,
+# this helper makes Steam treat that directory as a library folder out of the
+# box, so games already present under $HERMES_GAMES_DIR/steamapps and future
+# downloads there are recognized WITHOUT the user adding the folder manually.
+# It is invoked by hermes-steam-session as the "steam" user (Steam refuses to
+# run as root, and its library registry lives under
+# $HOME/.local/share/Steam/config/libraryfolders.vdf, HOME=/config/steam here).
+#
+# Guarantees:
+#   * Silent no-op when HERMES_GAMES_DIR is unset/empty — feature not configured.
+#   * Idempotent: when the path is already registered the file is left
+#     byte-for-byte untouched, so repeated starts never duplicate slots or
+#     rewrite Steam's own metadata.
+#   * Conservative: existing entries are NEVER rewritten. A missing registration
+#     is appended as a new numeric slot with minimal keys; everything else in
+#     the file survives verbatim. If the file does not parse as a modern
+#     libraryfolders VDF, we refuse to touch it and only warn.
+#   * Never fatal: every failure path logs "[hermes-steam][warn]" and exits 0,
+#     so Steam always starts and the folder can still be added manually.
+#   * Read-only mounts tolerated: a failure to create $HERMES_GAMES_DIR/steamapps
+#     is warned about, registration continues.
+#
+# First-start semantics (libraryfolders.vdf does not exist yet):
+#   We CREATE the file with slot "0" = Steam's own default library under $HOME
+#   (.local/share/Steam) and slot "1" = HERMES_GAMES_DIR. Writing ONLY our
+#   directory as slot "0" would silently promote a shared (possibly network-
+#   backed or read-only) mount to Steam's primary library folder — slot 0 is
+#   the default install location, so a fresh user's settings and downloads
+#   would land on the share. Mirroring Steam's own fresh layout (0 = default,
+#   extras after it) is exactly what a manual "add library folder" produces,
+#   and Steam adopts a pre-existing libraryfolders.vdf on bootstrap. The
+#   config dir chain is pre-created (steam-owned) by hermes-steam-session, and
+#   if even that fails (read-only /config) we only warn: a missing file means
+#   there is no client state to corrupt.
+#
+# Key/format drift: Steam has shuffled per-slot keys across client versions
+# (the old "AppConfig" layout, modern "libraryfolders" with content_id /
+# totalsize / freepercentage, and recent clients adding time_updated /
+# valid / configured bookkeeping). The image ships whatever Arch's `steam`
+# package currently installs and we cannot pin Steam's version from here, so:
+#   * "Already registered" detection compares the LOGICAL path value of any
+#     "path" key inside slot entries (with VDF escapes decoded), not one fixed
+#     key layout — it also recognizes entries Steam itself rewrote.
+#   * New slots carry path/label/content_id/time_updated/valid/configured + an
+#     empty "apps" block. Unknown-to-this-client keys are ignored by Valve's
+#     KeyValues reader, and missing bookkeeping keys are filled in by Steam
+#     when it scans the library. If a future client changes the top-level
+#     object name or the per-slot path key, the structural check below fails
+#     and we skip with a warning — Steam still starts, manual add still
+#     possible, the registry is never corrupted.
+set -u
+
+log()  { printf '\033[0;36m[hermes-steam]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[0;33m[hermes-steam][warn]\033[0m %s\n' "$*" >&2; }
+
+dir="${HERMES_GAMES_DIR:-}"
+[ -n "${dir}" ] || exit 0
+
+# Normalize trailing slashes ("/games/" -> "/games"; "/" stays "/"): Steam
+# writes paths without a trailing slash, and an exact-value comparison would
+# otherwise duplicate the slot on every start.
+while [ "${dir}" != "/" ] && [ "${dir##*/}" = "" ]; do
+    dir="${dir%/}"
+done
+
+if [ ! -d "${dir}" ]; then
+    warn "HERMES_GAMES_DIR='${dir}' is not a directory (mount missing?); skipping"
+    exit 0
+fi
+
+home="${HOME:-/config/steam}"
+steam_root="${home}/.local/share/Steam"
+cfg_dir="${steam_root}/config"
+vdf="${cfg_dir}/libraryfolders.vdf"
+
+# VDF-escape the path for writing inside "..." (backslash doubled, quote
+# escaped; spaces need no escaping inside quotes).
+esc_dir="$(printf '%s' "${dir}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+esc_root="$(printf '%s' "${steam_root}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+
+# Steam enumerates installed games via <library>/steamapps. Best effort: a
+# read-only share may refuse the mkdir; Steam then simply lists nothing there,
+# or finds the content the user pre-seeded (both fine).
+if ! mkdir -p "${dir}/steamapps" 2>/dev/null; then
+    warn "cannot create ${dir}/steamapps (read-only mount?); registration continues"
+fi
+
+epoch="$(date +%s 2>/dev/null || echo 0)"
+# Pseudo content_id: Steam replaces it with the real depot-manifest id when it
+# first touches the library; any unique-looking decimal is accepted.
+rand4="$(awk 'BEGIN{srand(); printf "%04d", int(rand()*10000)}' 2>/dev/null || echo 0000)"
+
+# One library slot in the modern fresh-layout shape. Tabs + one key per line
+# match what the client itself writes (style aside — style is not semantic).
+make_slot() {
+    # $1=slot number  $2=escaped path  $3=content_id
+    printf '\t"%s"\n' "$1"
+    printf '\t{\n'
+    printf '\t\t"path"\t\t"%s"\n' "$2"
+    printf '\t\t"label"\t\t""\n'
+    printf '\t\t"content_id"\t\t"%s"\n' "$3"
+    printf '\t\t"time_updated"\t\t"%s"\n' "${epoch}"
+    printf '\t\t"valid"\t\t"1"\n'
+    printf '\t\t"configured"\t\t"1"\n'
+    printf '\t\t"apps"\n'
+    printf '\t\t{\n'
+    printf '\t\t}\n'
+    printf '\t}\n'
+}
+
+if [ ! -e "${vdf}" ]; then
+    # ---- first start: seed Steam's fresh layout (see header rationale) ----
+    if ! mkdir -p "${cfg_dir}" 2>/dev/null; then
+        warn "cannot create ${cfg_dir} (volume ownership/permissions?); skipping"
+        exit 0
+    fi
+    tmp="${cfg_dir}/.libraryfolders.vdf.hermes.$$"
+    {
+        printf '"libraryfolders"\n{\n'
+        make_slot "0" "${esc_root}" "${epoch}${rand4}"
+        make_slot "1" "${esc_dir}" "${epoch}0001"
+        printf '}\n'
+    } >"${tmp}" 2>/dev/null || {
+        warn "cannot write ${tmp}; skipping"
+        rm -f "${tmp}" 2>/dev/null
+        exit 0
+    }
+    if mv -f "${tmp}" "${vdf}" 2>/dev/null; then
+        log "registered shared library ${dir} (seeded fresh ${vdf} with default slot 0)"
+    else
+        warn "cannot replace ${vdf}; skipping"
+        rm -f "${tmp}" 2>/dev/null
+    fi
+    exit 0
+fi
+
+[ -f "${vdf}" ] || { warn "${vdf} is not a regular file; not touching it"; exit 0; }
+[ -r "${vdf}" ] || { warn "${vdf} is not readable (uid $(id -u)?); skipping"; exit 0; }
+
+# ---- file exists: inspect, append a slot only when the path is absent ----
+# Character-level tokenizing scan of the document, producing three integers:
+#   reg     = 1 when some slot's "path" value equals our logical path
+#   maxn    = highest numeric slot key at depth 1 (Steam's own numbering)
+#   closer  = line number of the single brace that closes the top-level object
+# "0 0 0" on any structural doubt: first key must be "libraryfolders", depth
+# must balance to 0, there must be exactly one top-level close, and no string
+# token may span lines. Quote/escape state is tracked per character, so
+# backslashes, quotes, or spaces inside paths cannot fool the scan, and braces
+# inside quoted strings are ignored. Values reach awk via ENVIRON, not -v:
+# -v assignment would eat backslash escapes and corrupt path matching and the
+# inserted block alike.
+analysis="$(HERMES_VDF_RAW="${dir}" HERMES_VDF_ESC="${esc_dir}" awk '
+function unesc(s,  i, n, c, out, bs) {
+    n = length(s); out = ""; bs = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (bs) { out = out c; bs = 0; continue }
+        if (c == "\\") { bs = 1; continue }
+        out = out c
+    }
+    return out
+}
+function handle(tok,  d) {
+    d = depth
+    if (!firstseen) {
+        firstseen = 1
+        if (d != 0 || tok != "libraryfolders") bad = 1
+        return
+    }
+    if (d == 1) {
+        if (tok ~ /^[0-9]+$/ && tok + 0 > maxn) maxn = tok + 0
+        return
+    }
+    if (d == 2) {
+        if (pend) {
+            pend = 0
+            if (tok == ENVIRON["HERMES_VDF_ESC"] || unesc(tok) == ENVIRON["HERMES_VDF_RAW"]) reg = 1
+        } else if (tok == "path") {
+            pend = 1
+        }
+        return
+    }
+}
+BEGIN { depth = 0; inq = 0; bs = 0; tok = ""; maxn = -1; reg = 0
+        bad = 0; closer = 0; firstseen = 0; pend = 0; topcloses = 0 }
+{
+    n = length($0); bs = 0
+    for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (inq) {
+            if (bs) { tok = tok c; bs = 0; continue }
+            if (c == "\\") { tok = tok c; bs = 1; continue }
+            if (c == "\"") { inq = 0; handle(tok); tok = ""; continue }
+            tok = tok c
+        } else {
+            if (c == "\"") { inq = 1; tok = ""; bs = 0; continue }
+            if (c == "{") { depth++ }
+            else if (c == "}") {
+                if (depth == 1) { topcloses++; closer = NR }
+                depth--
+            }
+        }
+    }
+    if (inq) { bad = 1; inq = 0; tok = "" }
+}
+END {
+    if (depth != 0 || topcloses != 1 || bad) print "0 0 0"
+    else print reg, maxn, closer
+}' "${vdf}" 2>/dev/null)" || analysis=""
+
+reg=""; maxn=""; closer=""
+if [ -n "${analysis}" ]; then
+    # analysis is space-separated digits by construction; read splits on IFS
+    read -r reg maxn closer <<EOF
+${analysis}
+EOF
+fi
+for f in "${reg}" "${maxn}" "${closer}"; do
+    case "${f}" in
+        ''|*[!0-9]*)
+            warn "could not parse ${vdf}; leaving it untouched (add ${dir} manually in Steam if needed)"
+            exit 0 ;;
+    esac
+done
+
+if [ "${closer}" -eq 0 ]; then
+    warn "${vdf} does not look like a libraryfolders VDF; leaving it untouched"
+    exit 0
+fi
+if [ "${reg}" -eq 1 ]; then
+    log "shared library ${dir} already registered; ${vdf} untouched"
+    exit 0
+fi
+
+next=$((maxn + 1))
+block="$(make_slot "${next}" "${esc_dir}" "${epoch}$(printf '%04d' "$((next + 10))")")"
+
+tmp="${cfg_dir}/.libraryfolders.vdf.hermes.$$"
+# Byte-preserving insert: every line up to (exclusive) the closing brace of the
+# top-level object stays as-is; the new slot block goes in right before it.
+if ! HERMES_SLOT_BLOCK="${block}" awk -v cl="${closer}" '
+    NR == cl { print ENVIRON["HERMES_SLOT_BLOCK"] }
+    { print }' "${vdf}" >"${tmp}" 2>/dev/null; then
+    warn "cannot rewrite ${vdf}; skipping"
+    rm -f "${tmp}" 2>/dev/null
+    exit 0
+fi
+
+# Cheap post-check before the atomic swap: the new slot must be present and the
+# document must still open with "libraryfolders" and balance (same re-scan).
+recheck="$(HERMES_VDF_ESC="${esc_dir}" awk '
+BEGIN { depth = 0; inq = 0; bs = 0; tok = ""; first = ""; topcloses = 0; found = 0; bad = 0 }
+{
+    n = length($0); bs = 0
+    for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (inq) {
+            if (bs) { tok = tok c; bs = 0; continue }
+            if (c == "\\") { tok = tok c; bs = 1; continue }
+            if (c == "\"") {
+                inq = 0
+                if (first == "") first = tok
+                else if (depth == 2 && tok == ENVIRON["HERMES_VDF_ESC"]) found = 1
+                tok = ""
+                continue
+            }
+            tok = tok c
+        } else {
+            if (c == "\"") { inq = 1; tok = ""; bs = 0; continue }
+            if (c == "{") { depth++ }
+            else if (c == "}") { if (depth == 1) topcloses++; depth-- }
+        }
+    }
+    if (inq) { bad = 1; inq = 0; tok = "" }
+}
+END { print (first == "libraryfolders" && depth == 0 && !bad && topcloses == 1 && found) ? "ok" : "bad" }' "${tmp}" 2>/dev/null)"
+
+if [ "${recheck}" = "ok" ]; then
+    if mv -f "${tmp}" "${vdf}" 2>/dev/null; then
+        log "registered shared library ${dir} as libraryfolders slot ${next}"
+    else
+        warn "cannot replace ${vdf}; skipping"
+        rm -f "${tmp}" 2>/dev/null
+    fi
+else
+    warn "refusing to write suspicious output for ${vdf}; leaving original intact"
+    rm -f "${tmp}" 2>/dev/null
+fi
+exit 0

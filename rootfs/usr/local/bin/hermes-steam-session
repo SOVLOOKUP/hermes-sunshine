@@ -186,6 +186,25 @@ cleanup_session() {
 }
 trap cleanup_session EXIT INT TERM
 
+# Shared Steam library folder: when the host bind-mounts a games directory into
+# the container and exports its container path via HERMES_GAMES_DIR, register it
+# in Steam's library list BEFORE launching the client, so games already present
+# under $HERMES_GAMES_DIR/steamapps (and future downloads there) are recognized
+# with zero manual setup. The helper runs as the steam user — same identity and
+# HOME as the launch below, since libraryfolders.vdf lives under $HOME — is
+# idempotent, and never fatal: any failure only warns (Steam still starts and
+# the folder stays manually addable). Root-side pre-stage: make sure Steam's
+# config dir chain exists and is steam-owned so the first-ever start can seed
+# it; mirrors the install -d -o steam pattern used for the runtime dir above.
+if [ -n "${HERMES_GAMES_DIR:-}" ]; then
+    install -d -o steam -g steam /config/steam/.local/share/Steam/config 2>/dev/null || true
+    runuser -u steam -- env \
+        HOME=/config/steam \
+        HERMES_GAMES_DIR="${HERMES_GAMES_DIR}" \
+        /usr/local/bin/hermes-register-games-library \
+        || warn "games library registration failed (non-fatal); add ${HERMES_GAMES_DIR} manually in Steam settings if it is missing"
+fi
+
 log "launching Steam Big Picture (Gamepad UI)..."
 runuser -u steam -- env \
     HOME=/config/steam \

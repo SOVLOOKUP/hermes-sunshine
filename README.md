@@ -490,6 +490,16 @@ How it works and what to know:
   config) lives in `/config/steam`, so it survives container recreation. Games
   can be large — make sure the `/config` volume has room, or bind-mount a bigger
   disk there.
+- **Shared library folder (`HERMES_GAMES_DIR`).** Point this variable at a
+  container path that the host bind-mounts for you (e.g. `/games` with
+  `-v /your/games:/games`) and the launcher registers it as a Steam library
+  folder *before* Steam starts — games already present under
+  `/games/steamapps`, and future downloads there, show up in Big Picture with
+  zero manual setup. The registration is idempotent (repeated starts never
+  duplicate the entry) and non-fatal (any failure only warns in
+  `/var/log/steam.log`; Steam starts and the folder stays manually addable via
+  Settings → Storage). See [Runtime environment
+  variables](#runtime-environment-variables).
 - **Controllers.** Gamepad input arrives through the virtual `/dev/uinput` device
   (already mapped in the compose file) exactly like the streaming input path.
 - **Clean exit & session lifecycle teardown.** When you exit Steam or choose power off
@@ -552,6 +562,7 @@ denied`.
 | `ENABLE_XWAYLAND`              | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`              | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered (the shipped list then contains no apps at all). |
 | `STEAM_GAMESCOPE`              | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
+| `HERMES_GAMES_DIR`             | _(unset)_               | Container path of a host bind-mounted shared games directory (e.g. `/games`). When set, the Steam launcher auto-registers it as a library folder before launch (idempotent, non-fatal). See [Steam Big Picture](#steam-big-picture). |
 | `WLR_RENDERER`                 | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
 | `HERMES_CONFIG`                | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
 
