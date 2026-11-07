@@ -125,6 +125,27 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 > image, and reload the module (`modprobe -r hermes_kms && modprobe hermes_kms
 > initial_enabled=0`) before restarting the container.
 
+### Host readiness preflight (optional)
+
+`scripts/hermes-kms-guard` is a read-only wrapper around the module's runtime
+state. Its `preflight` command answers "would a DKMS build work on this host
+right now?" without modifying anything:
+
+```bash
+./scripts/hermes-kms-guard preflight
+./scripts/hermes-kms-guard preflight --json
+```
+
+It checks the running kernel's header tree
+(`/lib/modules/$(uname -r)/build/Makefile`), `dkms`/`make` availability, whether
+the host is immutable (`/run/ostree-booted`), Secure Boot state (via `mokutil`),
+and read/write access to `/dev/uinput` and `/dev/uhid`. Exit `0` means ready,
+`11` means a hard blocker (missing headers/tools or immutable host), and `20`
+means warnings only (for example Secure Boot enabled or a missing input device).
+The same probe gates `install` and `rebuild`; `rebuild` additionally requires an
+existing DKMS build for the running kernel before it unloads anything. Pass
+`--skip-preflight` to bypass the gate on an unusual host (not recommended).
+
 ### HDR (Hermes-KMS ≥ 0.4.0 / Hermes ≥ 0.6.0)
 
 Hermes-KMS ≥ 0.4.0 speaks UAPI 14 and is the first line that can carry HDR: with

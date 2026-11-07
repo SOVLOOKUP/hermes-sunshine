@@ -68,6 +68,15 @@ EOS
 exit 1
 EOS
 
+  cat > "$bin/mokutil" <<'EOS'
+#!/usr/bin/env bash
+# Fake mokutil; only --sb-state matters to the guard.
+if [[ "${1:-}" == "--sb-state" ]]; then
+  printf '%s\n' "${MOKUTIL_STATE:-SecureBoot disabled}"
+fi
+exit 0
+EOS
+
   cat > "$bin/modprobe" <<'EOS'
 #!/usr/bin/env bash
 printf 'modprobe %s\n' "$*" >> "${FAKELOG:-/dev/null}"
@@ -84,7 +93,9 @@ EOS
 #!/usr/bin/env bash
 printf 'dkms %s\n' "$*" >> "${FAKELOG:-/dev/null}"
 if [[ "${1:-}" == "status" ]]; then
-  printf 'hermes-kms/%s, %s, x86_64: installed\n' "${DKMS_VER:-0.4.1}" "$(uname -r)"
+  printf 'hermes-kms/%s, %s, x86_64: %s\n' \
+    "${DKMS_VER:-0.4.1}" "${DKMS_KERNEL:-$(uname -r)}" "${DKMS_STATE:-installed}"
+  exit "${DKMS_RC:-0}"
 fi
 exit 0
 EOS
@@ -134,18 +145,29 @@ setup_env() {
   PROC="$ENV/proc_modules"
   FAKELOG="$ENV/fake.log"
   SRC="$ENV/src"
-  mkdir -p "$DEV" "$SRC"
+  MODULES="$ENV/modules"
+  KERNEL_RELEASE="$(uname -r)"
+  mkdir -p "$DEV" "$SRC" "$MODULES/$KERNEL_RELEASE/build"
   : > "$FAKELOG"
   : > "$PROC"
+  : > "$ENV/dev/uinput"; chmod 0666 "$ENV/dev/uinput"
+  : > "$ENV/dev/uhid";   chmod 0666 "$ENV/dev/uhid"
   mkfake_bin "$BIN"
   mk_sysfs "$SYS"
   printf 'all:\n\t@true\n' > "$SRC/Makefile"
+  printf 'all:\n\t@true\n' > "$MODULES/$KERNEL_RELEASE/build/Makefile"
 
   # defaults for fake-command behaviour
   KMSCTL_UAPI=14
   KMSCTL_VER=0.4.1
   LSMOD_USED=0
   ALLOW_NR=1
+  DKMS_VER=0.4.1
+  DKMS_KERNEL="$KERNEL_RELEASE"
+  DKMS_STATE=installed
+  DKMS_RC=0
+  MOKUTIL_STATE="SecureBoot disabled"
+  SECURE_BOOT=""
 }
 
 # Run the guard hermetically; captures stdout in OUT, stderr in ERRTXT, code in RC.
@@ -154,9 +176,20 @@ rung() {
          GUARD_DEV_DRI="$DEV" \
          GUARD_PROC_MODULES="$PROC" \
          GUARD_SOURCE="$SRC" \
+         GUARD_MODULES_ROOT="$MODULES" \
+         GUARD_KERNEL_RELEASE="$KERNEL_RELEASE" \
+         GUARD_OSTREE_MARKER="$ENV/ostree-booted" \
+         GUARD_DEV_UINPUT="$ENV/dev/uinput" \
+         GUARD_DEV_UHID="$ENV/dev/uhid" \
+         GUARD_SECURE_BOOT="$SECURE_BOOT" \
          GUARD_STATE_DIR="$ENV/state" \
          GUARD_TEST_ALLOW_NONROOT="$ALLOW_NR" \
          PATH="$BIN:$PATH" \
+         DKMS_VER="$DKMS_VER" \
+         DKMS_KERNEL="$DKMS_KERNEL" \
+         DKMS_STATE="$DKMS_STATE" \
+         DKMS_RC="$DKMS_RC" \
+         MOKUTIL_STATE="$MOKUTIL_STATE" \
          FAKELOG="$FAKELOG" \
          KMSCTL_UAPI="$KMSCTL_UAPI" \
          KMSCTL_VER="$KMSCTL_VER" \
@@ -406,6 +439,121 @@ else
   eq "watch --rebuild non-root still exits 6" "$RC" "6"
   has "watch --rebuild non-root warns about root" "$ERRTXT" "needs root"
 fi
+
+# --- preflight: healthy host -------------------------------------------------
+setup_env
+rung preflight --json
+eq "preflight healthy exit 0" "$RC" "0"
+json_ok "$OUT" "preflight healthy JSON valid"
+eq "preflight healthy status ok" "$(json_field "$OUT" status)" "ok"
+eq "preflight kernel matches" "$(json_field "$OUT" kernel)" "$KERNEL_RELEASE"
+eq "preflight headers present" "$(json_field "$OUT" headers.present)" "True"
+eq "preflight dkms installed for kernel" "$(json_field "$OUT" dkms.installed_for_running_kernel)" "True"
+eq "preflight ostree false" "$(json_field "$OUT" ostree)" "False"
+eq "preflight secure boot disabled" "$(json_field "$OUT" secure_boot)" "disabled"
+eq "preflight uinput present" "$(json_field "$OUT" input.uinput.present)" "True"
+
+rung preflight
+eq "preflight text exit 0" "$RC" "0"
+has "preflight text shows kernel" "$OUT" "$KERNEL_RELEASE"
+has "preflight text shows result" "$OUT" "result: ok"
+
+# --- preflight: missing kernel headers is a hard failure --------------------
+setup_env
+rm -f "$MODULES/$KERNEL_RELEASE/build/Makefile"
+rung preflight --json
+eq "preflight missing headers exit 11" "$RC" "11"
+eq "preflight missing headers status error" "$(json_field "$OUT" status)" "error"
+eq "preflight missing headers present false" "$(json_field "$OUT" headers.present)" "False"
+has "preflight missing headers error detail" "$(json_field "$OUT" errors.0)" "kernel headers"
+
+# --- install: preflight aborts before dkms-install ---------------------------
+setup_env
+rm -f "$MODULES/$KERNEL_RELEASE/build/Makefile"
+rung install
+eq "install missing headers exit 11" "$RC" "11"
+hasnt "install missing headers skips dkms-install" "$(cat "$FAKELOG")" "dkms-install"
+has "install missing headers explains preflight" "$ERRTXT" "preflight"
+
+# --- install: --skip-preflight bypasses the gate ----------------------------
+setup_env
+rm -f "$MODULES/$KERNEL_RELEASE/build/Makefile"
+rung install --skip-preflight
+eq "install --skip-preflight exit 0" "$RC" "0"
+has "install --skip-preflight still builds" "$(cat "$FAKELOG")" "dkms-install"
+has "install --skip-preflight reports skip" "$ERRTXT" "skipped"
+
+# --- rebuild: preflight refuses before unloading -----------------------------
+setup_env
+add_render "$SYS" renderD128 hermes-kms general
+: > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+printf '0\n' > "$SYS/module/hermes_kms/refcnt"
+rm -f "$MODULES/$KERNEL_RELEASE/build/Makefile"
+rung rebuild
+eq "rebuild missing headers exit 11" "$RC" "11"
+hasnt "rebuild missing headers does not unload" "$(cat "$FAKELOG")" "modprobe -r"
+hasnt "rebuild missing headers does not build" "$(cat "$FAKELOG")" "dkms-install"
+
+# --- rebuild: DKMS must already cover the running kernel --------------------
+setup_env
+add_render "$SYS" renderD128 hermes-kms general
+: > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+printf '0\n' > "$SYS/module/hermes_kms/refcnt"
+DKMS_KERNEL="9.9.9-other-kernel"
+rung rebuild
+eq "rebuild without dkms for kernel exit 11" "$RC" "11"
+hasnt "rebuild without dkms does not unload" "$(cat "$FAKELOG")" "modprobe -r"
+has "rebuild without dkms says run install" "$ERRTXT" "run install first"
+
+# --- preflight: immutable/ostree host ---------------------------------------
+setup_env
+: > "$ENV/ostree-booted"
+rung preflight --json
+eq "preflight ostree exit 11" "$RC" "11"
+eq "preflight ostree status error" "$(json_field "$OUT" status)" "error"
+has "preflight ostree error detail" "$(json_field "$OUT" errors.0)" "immutable"
+
+# --- preflight: Secure Boot enabled is a warning ----------------------------
+setup_env
+MOKUTIL_STATE="SecureBoot enabled"
+rung preflight --json
+eq "preflight secure boot exit 20" "$RC" "20"
+eq "preflight secure boot status degraded" "$(json_field "$OUT" status)" "degraded"
+has "preflight secure boot warning" "$(json_field "$OUT" warnings.0)" "Secure Boot"
+
+# --- preflight: missing /dev/uinput is a warning ----------------------------
+setup_env
+rm -f "$ENV/dev/uinput"
+rung preflight --json
+eq "preflight missing uinput exit 20" "$RC" "20"
+eq "preflight missing uinput present false" "$(json_field "$OUT" input.uinput.present)" "False"
+has "preflight missing uinput warning" "$(json_field "$OUT" warnings.0)" "uinput"
+
+# --- preflight: no existing DKMS build is still install-ready ---------------
+setup_env
+DKMS_STATE="added"
+rung preflight --json
+eq "preflight not-installed-yet exit 0" "$RC" "0"
+eq "preflight not-installed-yet status ok" "$(json_field "$OUT" status)" "ok"
+eq "preflight not-installed-yet dkms false" "$(json_field "$OUT" dkms.installed_for_running_kernel)" "False"
+has "preflight not-installed-yet is informational" "$OUT" "not installed for"
+
+# --- status surfaces preflight but keeps module health exit code ------------
+setup_env
+add_render "$SYS" renderD128 hermes-kms general
+: > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+rm -f "$MODULES/$KERNEL_RELEASE/build/Makefile"
+rung status --json
+eq "status with preflight error still exit 0" "$RC" "0"
+json_ok "$OUT" "status with preflight is valid JSON"
+eq "status preflight headers false" "$(json_field "$OUT" preflight.headers.present)" "False"
+has "status JSON includes preflight object" "$OUT" '"preflight"'
+has "status checks include preflight info" "$OUT" 'preflight_kernel_headers'
+
+rung verify
+eq "verify with preflight error still exit 0" "$RC" "0"
+has "verify prints preflight info tag" "$OUT" "[info]"
+has "verify names preflight check" "$OUT" "preflight_kernel_headers"
 
 # =============================================================================
 printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"

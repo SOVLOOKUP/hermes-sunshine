@@ -9,7 +9,9 @@
 # those. It adds: a configurable source/ref/workdir, a safe rebuild that never
 # unloads a busy module, an unprivileged health check (module load state,
 # UAPI/version visibility, hdr_enable readability, Hermes render-node discovery
-# and read-only permissions), a bounded polling watcher, and jq-free JSON.
+# and read-only permissions), a read-only host build-readiness preflight (kernel
+# headers, DKMS registration, immutable OS, Secure Boot, uinput/uhid), a bounded
+# polling watcher, and jq-free JSON.
 #
 # It contains no product/business logic and no licensing or seat/session
 # concepts. It only observes and acts on the kernel module's runtime state.
@@ -37,6 +39,7 @@ readonly EX_RENDER_MISSING=7
 readonly EX_RENDER_PERM=8
 readonly EX_HDR_UNREADABLE=9
 readonly EX_UAPI_MISMATCH=10
+readonly EX_PREFLIGHT=11
 readonly EX_DEGRADED=20
 
 # --- configuration (env-overridable) ----------------------------------------
@@ -55,6 +58,12 @@ STATE_DIR="${GUARD_STATE_DIR:-${TMPDIR:-/tmp}/hermes-kms-guard-state}"
 SYS="${GUARD_SYSFS_ROOT:-/sys}"
 PROC_MODULES="${GUARD_PROC_MODULES:-/proc/modules}"
 DRI="${GUARD_DEV_DRI:-/dev/dri}"
+MODULES_ROOT="${GUARD_MODULES_ROOT:-/lib/modules}"
+KERNEL_RELEASE_OVERRIDE="${GUARD_KERNEL_RELEASE:-}"
+OSTREE_MARKER="${GUARD_OSTREE_MARKER:-/run/ostree-booted}"
+DEV_UINPUT="${GUARD_DEV_UINPUT:-/dev/uinput}"
+DEV_UHID="${GUARD_DEV_UHID:-/dev/uhid}"
+SECURE_BOOT_OVERRIDE="${GUARD_SECURE_BOOT:-}"
 
 # Command-line toggles.
 JSON=0
@@ -62,6 +71,7 @@ INTERVAL=30
 CYCLES=0
 DO_REBUILD=0
 NO_UNLOAD=0
+SKIP_PREFLIGHT=0
 
 SRCDIR=""
 
@@ -86,6 +96,27 @@ H_RENDER_PRIMARY=""
 H_STATUS="ok"
 H_EXIT=$EX_OK
 _err_min=""
+
+# --- host preflight state (populated by collect_preflight) -------------------
+PF_CHECKS=()
+PF_WARNINGS=()
+PF_ERRORS=()
+PF_STATUS="ok"
+PF_EXIT=$EX_OK
+H_KERNEL_RELEASE=""
+H_HEADERS_PRESENT=false
+H_HEADERS_PATH=""
+H_DKMS_AVAILABLE=false
+H_DKMS_INSTALLED=false
+H_DKMS_VERSIONS=()
+H_OSTREE=false
+H_SECURE_BOOT="unknown"
+H_UINPUT_PRESENT=false
+H_UINPUT_READABLE=false
+H_UINPUT_WRITABLE=false
+H_UHID_PRESENT=false
+H_UHID_READABLE=false
+H_UHID_WRITABLE=false
 
 # --- logging -----------------------------------------------------------------
 if [[ -t 2 && -z ${NO_COLOR:-} ]]; then
@@ -349,6 +380,257 @@ add_error() {
   fi
 }
 
+# --- host preflight ----------------------------------------------------------
+# Read-only host readiness probes. These answer "could a DKMS build work on
+# this host right now?" without touching the module, the DKMS database, or the
+# network. They deliberately do not require hermes-kms to be installed yet:
+# that is the installer's job, and rebuild checks for it separately.
+add_pf_check() { PF_CHECKS+=("$1|$2|$3"); }
+add_pf_warn()  { PF_WARNINGS+=("$1: $2"); }
+add_pf_error() { PF_ERRORS+=("$1: $2"); }
+
+dev_state() {
+  local p="$1"
+  if [[ ! -e "$p" ]]; then
+    printf 'missing'
+  elif [[ -r "$p" && -w "$p" ]]; then
+    printf 'rw'
+  elif [[ -r "$p" ]]; then
+    printf 'read-only'
+  else
+    printf 'present'
+  fi
+}
+
+detect_secure_boot() {
+  local out
+  if [[ -n "$SECURE_BOOT_OVERRIDE" ]]; then
+    case "$SECURE_BOOT_OVERRIDE" in
+      enabled|disabled|unknown) printf '%s' "$SECURE_BOOT_OVERRIDE" ;;
+      *) printf 'unknown' ;;
+    esac
+    return 0
+  fi
+  if ! command -v mokutil >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  out="$(mokutil --sb-state 2>/dev/null || true)"
+  case "$out" in
+    *"SecureBoot enabled"*)  printf 'enabled' ;;
+    *"SecureBoot disabled"*) printf 'disabled' ;;
+    *)                       printf 'unknown' ;;
+  esac
+}
+
+# Parses `dkms status` lines such as:
+#   hermes-kms/0.4.1, 6.8.0-arch1-1, x86_64: installed
+# Arch DKMS uses 0.4.1.rN.gSHA; accept any version that starts with the ref.
+parse_dkms_status() {
+  local out="$1" line ver rest kern st
+  H_DKMS_VERSIONS=()
+  H_DKMS_INSTALLED=false
+  while IFS= read -r line; do
+    [[ "$line" == hermes-kms/* ]] || continue
+    ver="${line#hermes-kms/}"
+    if [[ "$ver" == *", "* ]]; then
+      rest="${ver#*, }"
+      ver="${ver%%,*}"
+      if [[ "$rest" == *", "* ]]; then
+        kern="${rest%%,*}"
+        st="${rest#*, }"
+        if [[ "$kern" == "$H_KERNEL_RELEASE" && "$st" == *installed* ]]; then
+          H_DKMS_INSTALLED=true
+        fi
+      fi
+    fi
+    if [[ -n "$ver" && " ${H_DKMS_VERSIONS[*]:-} " != *" $ver "* ]]; then
+      H_DKMS_VERSIONS+=("$ver")
+    fi
+  done <<< "$out"
+}
+
+collect_preflight() {
+  PF_CHECKS=()
+  PF_WARNINGS=()
+  PF_ERRORS=()
+  PF_STATUS="ok"
+  PF_EXIT=$EX_OK
+
+  H_HEADERS_PRESENT=false
+  H_HEADERS_PATH=""
+  H_DKMS_AVAILABLE=false
+  H_DKMS_INSTALLED=false
+  H_DKMS_VERSIONS=()
+  H_OSTREE=false
+  H_SECURE_BOOT="unknown"
+  H_UINPUT_PRESENT=false
+  H_UINPUT_READABLE=false
+  H_UINPUT_WRITABLE=false
+  H_UHID_PRESENT=false
+  H_UHID_READABLE=false
+  H_UHID_WRITABLE=false
+
+  H_KERNEL_RELEASE="${KERNEL_RELEASE_OVERRIDE:-}"
+  if [[ -z "$H_KERNEL_RELEASE" ]]; then
+    H_KERNEL_RELEASE="$(uname -r 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$H_KERNEL_RELEASE" ]]; then
+    add_pf_check kernel_release error "could not determine the running kernel release"
+    add_pf_error kernel_release "could not determine the running kernel release"
+  else
+    add_pf_check kernel_release ok "$H_KERNEL_RELEASE"
+    H_HEADERS_PATH="$MODULES_ROOT/$H_KERNEL_RELEASE/build/Makefile"
+    if [[ -f "$H_HEADERS_PATH" ]]; then
+      H_HEADERS_PRESENT=true
+      add_pf_check kernel_headers ok "$H_HEADERS_PATH"
+    else
+      add_pf_check kernel_headers error "missing $H_HEADERS_PATH"
+      add_pf_error kernel_headers \
+        "kernel headers for $H_KERNEL_RELEASE not found (expected $H_HEADERS_PATH)"
+    fi
+  fi
+
+  if command -v dkms >/dev/null 2>&1; then
+    H_DKMS_AVAILABLE=true
+    add_pf_check dkms_command ok "$(command -v dkms)"
+    local dkms_out
+    dkms_out="$(dkms status 2>/dev/null || true)"
+    parse_dkms_status "$dkms_out"
+  else
+    add_pf_check dkms_command error "dkms not found in PATH"
+    add_pf_error dkms "dkms is not installed"
+  fi
+
+  if command -v make >/dev/null 2>&1; then
+    add_pf_check make ok "$(command -v make)"
+  else
+    add_pf_check make error "make not found in PATH"
+    add_pf_error make "make is not installed"
+  fi
+
+  if [[ "$H_DKMS_AVAILABLE" == "true" && -n "$H_KERNEL_RELEASE" ]]; then
+    if [[ "$H_DKMS_INSTALLED" == "true" ]]; then
+      add_pf_check dkms_build ok "hermes-kms is installed for $H_KERNEL_RELEASE"
+    else
+      add_pf_check dkms_build info \
+        "hermes-kms is not installed for $H_KERNEL_RELEASE yet (install will register it)"
+    fi
+  fi
+
+  # Version drift is a warning only; an Arch package may carry 0.4.1.rN.gSHA.
+  local refver v matched=0
+  refver="${REF#v}"
+  if [[ "$refver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && (( ${#H_DKMS_VERSIONS[@]} > 0 )); then
+    for v in "${H_DKMS_VERSIONS[@]}"; do
+      if [[ "$v" == "$refver" || "$v" == "$refver".* ]]; then
+        matched=1
+      fi
+    done
+    if (( matched )); then
+      add_pf_check dkms_version ok "installed version matches ref $refver"
+    else
+      add_pf_check dkms_version warn \
+        "installed ${H_DKMS_VERSIONS[*]} does not match ref $refver"
+      add_pf_warn dkms_version "installed DKMS version(s) do not match --ref $refver"
+    fi
+  fi
+
+  if [[ -e "$OSTREE_MARKER" ]]; then
+    H_OSTREE=true
+    add_pf_check ostree error "immutable host marker present ($OSTREE_MARKER)"
+    add_pf_error ostree \
+      "immutable/ostree host detected; DKMS builds are not supported on this host"
+  else
+    add_pf_check ostree ok "no ostree marker"
+  fi
+
+  H_SECURE_BOOT="$(detect_secure_boot)"
+  case "$H_SECURE_BOOT" in
+    enabled)
+      add_pf_check secure_boot warn "Secure Boot enabled; module must be signed or MOK-enrolled"
+      add_pf_warn secure_boot \
+        "Secure Boot is enabled; hermes_kms must be signed or a MOK enrolled"
+      ;;
+    disabled)
+      add_pf_check secure_boot ok "Secure Boot disabled"
+      ;;
+    *)
+      add_pf_check secure_boot info "Secure Boot state unknown (mokutil unavailable)"
+      ;;
+  esac
+
+  if [[ -e "$DEV_UINPUT" ]]; then
+    H_UINPUT_PRESENT=true
+    if [[ -r "$DEV_UINPUT" ]]; then H_UINPUT_READABLE=true; fi
+    if [[ -w "$DEV_UINPUT" ]]; then H_UINPUT_WRITABLE=true; fi
+    if [[ "$H_UINPUT_READABLE" == "true" && "$H_UINPUT_WRITABLE" == "true" ]]; then
+      add_pf_check uinput ok "$DEV_UINPUT is readable and writable"
+    else
+      add_pf_check uinput warn "$DEV_UINPUT is present but not readable and writable"
+      add_pf_warn uinput "$DEV_UINPUT is present but not readable and writable"
+    fi
+  else
+    add_pf_check uinput warn "$DEV_UINPUT is missing"
+    add_pf_warn uinput "$DEV_UINPUT is missing (virtual input will not work)"
+  fi
+
+  if [[ -e "$DEV_UHID" ]]; then
+    H_UHID_PRESENT=true
+    if [[ -r "$DEV_UHID" ]]; then H_UHID_READABLE=true; fi
+    if [[ -w "$DEV_UHID" ]]; then H_UHID_WRITABLE=true; fi
+    if [[ "$H_UHID_READABLE" == "true" && "$H_UHID_WRITABLE" == "true" ]]; then
+      add_pf_check uhid ok "$DEV_UHID is readable and writable"
+    else
+      add_pf_check uhid warn "$DEV_UHID is present but not readable and writable"
+      add_pf_warn uhid "$DEV_UHID is present but not readable and writable"
+    fi
+  else
+    add_pf_check uhid warn "$DEV_UHID is missing"
+    add_pf_warn uhid "$DEV_UHID is missing (virtual HID will not work)"
+  fi
+
+  if (( ${#PF_ERRORS[@]} > 0 )); then
+    PF_STATUS="error"
+    PF_EXIT=$EX_PREFLIGHT
+  elif (( ${#PF_WARNINGS[@]} > 0 )); then
+    PF_STATUS="degraded"
+    PF_EXIT=$EX_DEGRADED
+  else
+    PF_STATUS="ok"
+    PF_EXIT=$EX_OK
+  fi
+  return 0
+}
+
+# Gate used by install/rebuild. require_dkms=1 additionally demands an existing
+# DKMS build for the running kernel (rebuild must not unload a module it cannot
+# reinstall). Returns EX_PREFLIGHT without touching the module on failure.
+preflight_gate() {
+  local require_dkms="$1" e w
+  if (( SKIP_PREFLIGHT )); then
+    info "host preflight skipped (--skip-preflight)"
+    return 0
+  fi
+  collect_preflight
+  if (( ${#PF_ERRORS[@]} > 0 )); then
+    for e in "${PF_ERRORS[@]}"; do
+      err "preflight: $e"
+    done
+    err "host preflight failed; fix the above or pass --skip-preflight"
+    return "$EX_PREFLIGHT"
+  fi
+  if [[ "$require_dkms" == "true" && "$H_DKMS_INSTALLED" != "true" ]]; then
+    err "preflight: hermes-kms is not installed via DKMS for kernel $H_KERNEL_RELEASE; run install first"
+    return "$EX_PREFLIGHT"
+  fi
+  for w in ${PF_WARNINGS[@]+"${PF_WARNINGS[@]}"}; do
+    warn "preflight: $w"
+  done
+  return 0
+}
+
 collect_health() {
   CHECKS=()
   WARNINGS=()
@@ -369,6 +651,17 @@ collect_health() {
   H_RENDER_FOUND=false
   H_RENDER_COUNT=0
   H_RENDER_PRIMARY=""
+
+  # Surface preflight facts in every status/verify/write_state output. These
+  # checks are informational here and never change the module health exit code;
+  # `preflight` and the install/rebuild gates are the authoritative readiness
+  # signals.
+  collect_preflight
+  local pfitem pfi pfd
+  for pfitem in ${PF_CHECKS[@]+"${PF_CHECKS[@]}"}; do
+    IFS='|' read -r pfi _ pfd <<<"$pfitem"
+    add_check "preflight_$pfi" info "preflight: $pfd"
+  done
 
   if [[ -d "$SYS/module/hermes_kms" ]] \
      || grep -q '^hermes_kms[[:space:]]' "$PROC_MODULES" 2>/dev/null; then
@@ -489,8 +782,87 @@ collect_health() {
 }
 
 # --- rendering ---------------------------------------------------------------
+print_preflight_json() {
+  local ts host first item id st det v
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  host="$(hostname 2>/dev/null || echo unknown)"
+
+  printf '{\n'
+  printf '  "guard_version": %s,\n' "$(jstr "$GUARD_VERSION")"
+  printf '  "timestamp": %s,\n' "$(jstr "$ts")"
+  printf '  "host": %s,\n' "$(jstr "$host")"
+  printf '  "status": %s,\n' "$(jstr "$PF_STATUS")"
+  printf '  "exit_code": %d,\n' "$PF_EXIT"
+  printf '  "kernel": %s,\n' "$(jstr "$H_KERNEL_RELEASE")"
+  printf '  "headers": {"present": %s, "path": %s},\n' \
+    "$(jbool "$H_HEADERS_PRESENT")" "$(jstr "$H_HEADERS_PATH")"
+  printf '  "dkms": {"available": %s, "installed_for_running_kernel": %s, "versions": [' \
+    "$(jbool "$H_DKMS_AVAILABLE")" "$(jbool "$H_DKMS_INSTALLED")"
+  first=1
+  for v in ${H_DKMS_VERSIONS[@]+"${H_DKMS_VERSIONS[@]}"}; do
+    if (( first )); then first=0; else printf ', '; fi
+    printf '%s' "$(jstr "$v")"
+  done
+  printf ']},\n'
+  printf '  "ostree": %s,\n' "$(jbool "$H_OSTREE")"
+  printf '  "secure_boot": %s,\n' "$(jstr "$H_SECURE_BOOT")"
+  printf '  "input": {"uinput": {"present": %s, "readable": %s, "writable": %s}, "uhid": {"present": %s, "readable": %s, "writable": %s}},\n' \
+    "$(jbool "$H_UINPUT_PRESENT")" "$(jbool "$H_UINPUT_READABLE")" "$(jbool "$H_UINPUT_WRITABLE")" \
+    "$(jbool "$H_UHID_PRESENT")" "$(jbool "$H_UHID_READABLE")" "$(jbool "$H_UHID_WRITABLE")"
+
+  printf '  "checks": ['
+  first=1
+  for item in ${PF_CHECKS[@]+"${PF_CHECKS[@]}"}; do
+    IFS='|' read -r id st det <<<"$item"
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    {"id": %s, "status": %s, "detail": %s}' \
+      "$(jstr "$id")" "$(jstr "$st")" "$(jstr "$det")"
+  done
+  if (( first )); then printf '],\n'; else printf '\n  ],\n'; fi
+
+  printf '  "warnings": ['
+  first=1
+  for item in ${PF_WARNINGS[@]+"${PF_WARNINGS[@]}"}; do
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    %s' "$(jstr "$item")"
+  done
+  if (( first )); then printf '],\n'; else printf '\n  ],\n'; fi
+
+  printf '  "errors": ['
+  first=1
+  for item in ${PF_ERRORS[@]+"${PF_ERRORS[@]}"}; do
+    if (( first )); then printf '\n'; first=0; else printf ',\n'; fi
+    printf '    %s' "$(jstr "$item")"
+  done
+  if (( first )); then printf ']\n'; else printf '\n  ]\n'; fi
+  printf '}\n'
+}
+
+print_preflight_text() {
+  local item id st det tag
+  printf 'host preflight: %s (exit %d)\n' "$PF_STATUS" "$PF_EXIT"
+  printf '  kernel:  %s\n' "${H_KERNEL_RELEASE:-unknown}"
+  printf '  headers: %s (%s)\n' "$H_HEADERS_PRESENT" "${H_HEADERS_PATH:-n/a}"
+  printf '  dkms:    available=%s installed=%s versions=%s\n' \
+    "$H_DKMS_AVAILABLE" "$H_DKMS_INSTALLED" "${H_DKMS_VERSIONS[*]:-none}"
+  printf '  host:    ostree=%s secure_boot=%s\n' "$H_OSTREE" "$H_SECURE_BOOT"
+  printf '  input:   uinput=%s uhid=%s\n' "$(dev_state "$DEV_UINPUT")" "$(dev_state "$DEV_UHID")"
+  for item in ${PF_CHECKS[@]+"${PF_CHECKS[@]}"}; do
+    IFS='|' read -r id st det <<<"$item"
+    case "$st" in
+      ok)    tag="ok" ;;
+      warn)  tag="warn" ;;
+      error) tag="ERROR" ;;
+      info)  tag="info" ;;
+      *)     tag="$st" ;;
+    esac
+    printf '  [%-5s] %-18s %s\n' "$tag" "$id" "$det"
+  done
+  printf 'result: %s (exit %d)\n' "$PF_STATUS" "$PF_EXIT"
+}
+
 print_status_json() {
-  local ts host first item id st det rec path drv mode ro role firstnode
+  local ts host first item id st det rec path drv mode ro role firstnode v
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   host="$(hostname 2>/dev/null || echo unknown)"
 
@@ -500,6 +872,25 @@ print_status_json() {
   printf '  "host": %s,\n' "$(jstr "$host")"
   printf '  "status": %s,\n' "$(jstr "$H_STATUS")"
   printf '  "exit_code": %d,\n' "$H_EXIT"
+
+  printf '  "preflight": {\n'
+  printf '    "kernel": %s,\n' "$(jstr "$H_KERNEL_RELEASE")"
+  printf '    "headers": {"present": %s, "path": %s},\n' \
+    "$(jbool "$H_HEADERS_PRESENT")" "$(jstr "$H_HEADERS_PATH")"
+  printf '    "dkms": {"available": %s, "installed_for_running_kernel": %s, "versions": [' \
+    "$(jbool "$H_DKMS_AVAILABLE")" "$(jbool "$H_DKMS_INSTALLED")"
+  first=1
+  for v in ${H_DKMS_VERSIONS[@]+"${H_DKMS_VERSIONS[@]}"}; do
+    if (( first )); then first=0; else printf ', '; fi
+    printf '%s' "$(jstr "$v")"
+  done
+  printf ']},\n'
+  printf '    "ostree": %s,\n' "$(jbool "$H_OSTREE")"
+  printf '    "secure_boot": %s,\n' "$(jstr "$H_SECURE_BOOT")"
+  printf '    "input": {"uinput": {"present": %s, "readable": %s, "writable": %s}, "uhid": {"present": %s, "readable": %s, "writable": %s}}\n' \
+    "$(jbool "$H_UINPUT_PRESENT")" "$(jbool "$H_UINPUT_READABLE")" "$(jbool "$H_UINPUT_WRITABLE")" \
+    "$(jbool "$H_UHID_PRESENT")" "$(jbool "$H_UHID_READABLE")" "$(jbool "$H_UHID_WRITABLE")"
+  printf '  },\n'
 
   printf '  "checks": ['
   first=1
@@ -558,6 +949,9 @@ print_status_text() {
     printf ' version=%s (%s)' "$H_DRIVER_VERSION" "$H_VERSION_SOURCE"
   fi
   printf '\n'
+  printf '  host:   kernel=%s headers=%s dkms=%s ostree=%s secureboot=%s\n' \
+    "${H_KERNEL_RELEASE:-?}" "$H_HEADERS_PRESENT" "$H_DKMS_INSTALLED" "$H_OSTREE" "$H_SECURE_BOOT"
+  printf '  input:  uinput=%s uhid=%s\n' "$(dev_state "$DEV_UINPUT")" "$(dev_state "$DEV_UHID")"
   if [[ "$H_UAPI_VISIBLE" == "true" ]]; then
     printf '  uapi:   %s (expected %s)\n' "$H_UAPI" "${H_EXPECTED_UAPI:-unknown}"
   else
@@ -654,6 +1048,15 @@ rebuild_once() {
     err "dkms is required to rebuild"
     return "$EX_UPSTREAM"
   fi
+
+  # Refuse before unloading anything if the host cannot rebuild: a successful
+  # unload followed by a missing-header build would take a working module down.
+  local prc=0
+  preflight_gate true || prc=$?
+  if (( prc != 0 )); then
+    return "$prc"
+  fi
+
   if ! resolve_source; then
     err "could not obtain upstream source"
     return "$EX_UPSTREAM"
@@ -720,6 +1123,15 @@ cmd_install() {
   if ! command -v dkms >/dev/null 2>&1; then
     die "$EX_UPSTREAM" "dkms is required to install"
   fi
+
+  # Fresh hosts are expected to have no DKMS build yet, so this gate only
+  # rejects truly unbuildable hosts (missing headers/tools, immutable OS).
+  local prc=0
+  preflight_gate false || prc=$?
+  if (( prc != 0 )); then
+    return "$prc"
+  fi
+
   if ! resolve_source; then
     die "$EX_UPSTREAM" "could not obtain upstream source (set --repo/--ref or --source)"
   fi
@@ -764,6 +1176,12 @@ cmd_rebuild() {
   local rc=0
   rebuild_once || rc=$?
   return "$rc"
+}
+
+cmd_preflight() {
+  collect_preflight
+  if (( JSON )); then print_preflight_json; else print_preflight_text; fi
+  return "$PF_EXIT"
 }
 
 cmd_status() {
@@ -838,6 +1256,7 @@ COMMANDS
   uninstall    Remove the module via upstream 'make dkms-uninstall', then unload (root)
   rebuild      Safely rebuild and reload; refuses to unload a busy module       (root)
   verify       Check loaded module, UAPI/version, hdr_enable, render node & perms
+  preflight    Check host build readiness (kernel headers, DKMS, ostree, Secure Boot, input)
   watch        Bounded polling health monitor; optional safe rebuild on failure
   status       Print current health; add --json for machine-readable output
   version      Print the wrapper version
@@ -849,11 +1268,12 @@ OPTIONS
   --workdir DIR     Checkout working directory (env GUARD_WORKDIR, default ${DEFAULT_WORKDIR})
   --source DIR      Use an existing checkout instead of cloning (env GUARD_SOURCE)
   --expected-uapi N Expected UAPI version (env GUARD_EXPECTED_UAPI; default derived from --ref)
-  --json            Machine-readable JSON output (status, verify)
+  --json            Machine-readable JSON output (status, verify, preflight)
   --interval SEC    watch poll interval in seconds (default 30)
   --cycles N        watch polls before exit; 0 = until interrupted (default 0)
   --rebuild         watch: attempt a safe rebuild when unhealthy (needs root)
   --no-unload       uninstall: remove the DKMS registration but leave the module loaded
+  --skip-preflight  install/rebuild: continue even if host preflight fails (not recommended)
   -h, --help        Show this help
   --version         Print the wrapper version
 
@@ -861,11 +1281,13 @@ EXIT CODES
   0  healthy / success        1  unexpected error        2  usage error
   3  root required            4  upstream fetch/build    5  module busy
   6  module not loaded        7  no render node          8  render node writable
-  9  hdr_enable unreadable    10 UAPI mismatch           20 degraded (warnings only)
+  9  hdr_enable unreadable    10 UAPI mismatch           11 host preflight failed
+  20 degraded (warnings only)
 
 Upstream ships 'make dkms-install' / 'make dkms-uninstall' plus helper scripts; this
-wrapper calls those instead of reimplementing installation. Additional upstream
-post-install helpers are intentionally left to upstream and not re-implemented here.
+wrapper calls those instead of reimplementing installation. Host preflight is a
+read-only readiness probe (headers, DKMS state, immutable OS, Secure Boot, input
+devices); it does not install, sign, or configure anything on the host.
 EOF
 }
 
@@ -909,6 +1331,8 @@ parse_all() {
         DO_REBUILD=1; shift ;;
       --no-unload)
         NO_UNLOAD=1; shift ;;
+      --skip-preflight)
+        SKIP_PREFLIGHT=1; shift ;;
       -h|--help)
         usage; exit 0 ;;
       --version)
@@ -932,7 +1356,7 @@ main() {
       usage; exit 0 ;;
     version|--version)
       version; exit 0 ;;
-    install|uninstall|verify|rebuild|watch|status)
+    install|uninstall|verify|preflight|rebuild|watch|status)
       parse_all "$@" ;;
     *)
       die "$EX_USAGE" "unknown command: $cmd (see --help)" ;;
@@ -942,6 +1366,7 @@ main() {
     install)   cmd_install ;;
     uninstall) cmd_uninstall ;;
     verify)    cmd_verify ;;
+    preflight) cmd_preflight ;;
     rebuild)   cmd_rebuild ;;
     watch)     cmd_watch ;;
     status)    cmd_status ;;
