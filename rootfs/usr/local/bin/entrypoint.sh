@@ -408,12 +408,25 @@ setup_kms_env() {
 }
 
 # Environment for the headless backend: a software/GPU-rendered virtual output
-# that needs no seat or session — the reliable path inside a container. NOTE:
-# the backend selector is WLR_BACKENDS (plural); the singular form is silently
-# ignored, which makes wlroots autodetect DRM and fail for lack of a seat.
+# used when no Hermes-KMS card is available. NOTE: the backend selector is
+# WLR_BACKENDS (plural); the singular form is silently ignored, which makes
+# wlroots autodetect DRM and fail for lack of a seat.
+#
+# The headless backend must STILL deliver input. Hermes injects the keyboard/
+# mouse/gamepad through uinput, and sway only ever sees those as evdev nodes via
+# libinput. wlroots does NOT autodetect libinput once WLR_BACKENDS is set
+# explicitly, so it has to be listed here too (exactly as setup_kms_env does) —
+# omit it and get_inputs == [] and the fallback stream has video but no input at
+# all. libinput opens /dev/input devices through a libseat session, so start
+# seatd and point libseat at it, like the KMS path. WLR_LIBINPUT_NO_DEVICES=1
+# lets sway come up before Hermes has created any device (they are hotplugged per
+# session). If seatd cannot start, libinput simply finds no devices — the same
+# behaviour as before this change, so it never makes the fallback fail closed.
 setup_headless_env() {
-    unset LIBSEAT_BACKEND WLR_DRM_DEVICES
-    export WLR_BACKENDS=headless
+    unset WLR_DRM_DEVICES
+    start_seat
+    export LIBSEAT_BACKEND=seatd
+    export WLR_BACKENDS=headless,libinput
     export WLR_HEADLESS_OUTPUTS=1
     export WLR_LIBINPUT_NO_DEVICES=1
     if [ -n "${RENDER_NODE}" ]; then
@@ -540,34 +553,46 @@ if [ "${KMS_ZEROCOPY:-false}" = "true" ]; then
 else
     # Headless fallback: Hermes captures sway's own output directly, so ensure
     # one exists and carries the requested mode.
-    local out
-    if command -v jq >/dev/null 2>&1; then
-        out="$(swaymsg -t get_outputs 2>/dev/null | jq -r '.[0].name // empty')"
-    else
-        out="$(swaymsg -t get_outputs 2>/dev/null \
-            | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-            | sed -E 's/.*"([^"]+)"$/\1/')"
-    fi
-    if [ -z "${out}" ]; then
-        # Some wlroots builds start the headless backend with zero outputs;
-        # create one explicitly so there is a surface to capture.
-        swaymsg create_output >/dev/null 2>&1 || true
-        sleep 0.3
+    local out=""
+    # Enumerating outputs right after sway starts races the headless backend
+    # coming up: on some boots swaymsg returns an empty list even though sway is
+    # already serving the socket. A single retry is not enough — a boot that
+    # loses the race leaves `out` empty, the mode is never applied, and the
+    # stream stays at the sway template's small baseline resolution (blurry when
+    # a 4K client upscales it). Retry until the output appears (up to ~5s).
+    headless_first_output() {
         if command -v jq >/dev/null 2>&1; then
-            out="$(swaymsg -t get_outputs 2>/dev/null | jq -r '.[0].name // empty')"
+            swaymsg -t get_outputs 2>/dev/null | jq -r '.[0].name // empty'
         else
-            out="$(swaymsg -t get_outputs 2>/dev/null \
+            swaymsg -t get_outputs 2>/dev/null \
                 | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
-                | sed -E 's/.*"([^"]+)"$/\1/')"
+                | sed -E 's/.*"([^"]+)"$/\1/'
         fi
+    }
+    local i
+    for i in $(seq 1 50); do
+        out="$(headless_first_output || true)"
+        [ -n "${out}" ] && break
+        # Some wlroots builds start the headless backend with zero outputs;
+        # nudge it once to create one, then keep polling.
+        if [ "${i}" -eq 1 ]; then
+            swaymsg create_output >/dev/null 2>&1 || true
+        fi
+        sleep 0.1
+    done
+    if [ -z "${out}" ]; then
+        # Last resort: with WLR_HEADLESS_OUTPUTS=1 the headless backend names its
+        # only output HEADLESS-1. Apply the mode by that name even though
+        # enumeration raced, so a slow start still yields a sharp stream instead
+        # of the template baseline.
+        out="HEADLESS-1"
+        warn "output enumeration timed out; assuming headless output name is ${out}"
     fi
-    if [ -n "${out}" ]; then
+    if swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
+        || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1; then
         log "compositor output: ${out} -> ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz"
-        swaymsg output "${out}" mode "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-            || swaymsg output "${out}" resolution "${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz" >/dev/null 2>&1 \
-            || warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out}"
     else
-        warn "could not determine the compositor output name (see /var/log/sway.log)"
+        warn "could not set mode ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}@${DISPLAY_REFRESH}Hz on ${out} (see /var/log/sway.log)"
     fi
 fi
 
