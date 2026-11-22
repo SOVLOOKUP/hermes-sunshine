@@ -572,7 +572,8 @@ denied`.
 | `SUNSHINE_NAME`                | _(hostname)_            | Server name advertised in Moonlight / Artemis / Hestia. Defaults to container hostname.                                                                                        |
 | `PORT`                         | `47989`                 | Base port (default 47989, web UI at `PORT+1` = 47990). Automatically shifts streaming and control ports.                                                                       |
 | `ADDRESS_FAMILY`               | `both`                  | Network IP stack binding: `both`, `ipv4`, or `ipv6`. Use `ipv4` if host encounters IPv6 or dual-stack port binding conflicts.                                                 |
-| `IGNORE_ENCODER_PROBE_FAILURE` | `disabled`              | Set `enabled` (or `true`) to bypass synthetic capture and encoder probe checks on unusual or purely headless setups.                                                           |
+| `IGNORE_ENCODER_PROBE_FAILURE` | `enabled`               | Default `enabled`: Hermes 0.7.0 probes capture with a dummy SDR config, which fails against an HDR output and aborts the stream (503) unless bypassed. Set `disabled` only if you want the probe enforced. |
+| `ENABLE_HDR`                   | `auto`                  | HDR10 on the virtual display: `auto` (enable when `hermes_kms` advertises `hdr_enable=Y`, with dynamic SDR fallback), `true`/`on`, or `false`/`off`. |
 | `DRI_PRIME`                    | `1` (if multi-GPU)      | Controls DRI PRIME GPU offloading injected into the Steam Big Picture session.                                                                                                 |
 | `DISPLAY_WIDTH`                | `1920`                  | Virtual output width.                                                                                                                                                           |
 | `DISPLAY_HEIGHT`               | `1080`                  | Virtual output height.                                                                                                                                                          |
@@ -599,6 +600,30 @@ by older image versions are migrated in place (`/config/sunshine.conf` →
 `/config/.config/hermes/`). The entrypoint only seeds when a key is absent, so
 edits you make in the web UI (which Hermes writes back to the same file) are
 never overwritten.
+
+### Control-plane contract
+
+A control plane that owns the container can drive a few switches without
+editing the user's config. Every variable is optional; when it is unset the
+image behaves exactly as documented above.
+
+| Variable                          | Values         | Effect                                                                                                                                              |
+| --------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HERMES_COMPONENT_HDR`            | `1` / `0`      | Forces `ENABLE_HDR=true` / `false`. Unset keeps `auto` (module capability decides).                                                                 |
+| `HERMES_COMPONENT_STEAM_GAMESCOPE` | `1` / `0`     | Forces `STEAM_GAMESCOPE=true` / `false`. Unset keeps the `STEAM_GAMESCOPE` default (`false`).                                                        |
+| `HERMES_MAX_BITRATE_KBPS`         | 1000–1000000   | Writes `max_bitrate` into `hermes.conf`. Out-of-range values are clamped with a warning, never fatal.                                                |
+| `HERMES_MAX_FPS`                  | ≥ 1            | Adds `fps_limit` to every app's `MANGOHUD_CONFIG` (merging with the options already there) plus `DXVK_FRAME_RATE` / `VKD3D_FRAME_RATE`.              |
+| `HERMES_FEC_PERCENTAGE`           | 1–50           | Writes `fec_percentage` into `hermes.conf`, overriding the adaptive controller for this container.                                                  |
+
+The image publishes the switch list in `/usr/local/share/hermes/components.json`
+(`states`, `default`, and the environment variable each switch reads), so a
+control plane can render the toggles without hard-coding component names.
+Unknown component names are ignored on purpose: a newer control plane must not
+be able to break an older image.
+
+Limits are folded in once at boot, before Hermes starts. Unsetting a variable
+stops future writes but does **not** remove a value already written — clear it
+in the web UI (or set the limit explicitly) if you need to undo it.
 
 ## Ports
 

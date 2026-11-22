@@ -24,6 +24,22 @@ case "${action}" in
         fi
         ;;
     do|*)
+        # A per-client profile can pin the mode; the profile wins over the client's
+        # request because the operator set it for this client.
+        case "${HERMES_HDR_MODE:-auto}" in
+            off|sdr)
+                swaymsg output Virtual-1 hdr off 2>/dev/null || true
+                echo "hermes-hdr-match: profile pins SDR"
+                exit 0
+                ;;
+            hdr10|on)
+                if has_hdr_module; then
+                    swaymsg output Virtual-1 hdr on 2>/dev/null || true
+                    sleep 0.1
+                fi
+                exit 0
+                ;;
+        esac
         hdr_req="${HERMES_CLIENT_HDR:-${SUNSHINE_CLIENT_HDR:-false}}"
         case "${hdr_req}" in
             1|true|TRUE|yes|YES)

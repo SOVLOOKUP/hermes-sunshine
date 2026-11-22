@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "components": [
+    {
+      "name": "hdr",
+      "version": "1.0.0",
+      "kind": "toggle",
+      "requires_restart": true,
+      "risk": "low",
+      "tier": null,
+      "env": "HERMES_COMPONENT_HDR",
+      "states": ["on", "off", "auto"],
+      "default": "auto",
+      "description": "HDR10 output on the virtual display (ENABLE_HDR). Needs hermes_kms with hdr_enable=Y. 'auto' leaves ENABLE_HDR untouched, so the module's own capability decides."
+    },
+    {
+      "name": "steam-gamescope",
+      "version": "1.0.0",
+      "kind": "toggle",
+      "requires_restart": true,
+      "risk": "medium",
+      "tier": null,
+      "env": "HERMES_COMPONENT_STEAM_GAMESCOPE",
+      "states": ["on", "off"],
+      "default": "off",
+      "description": "Run the Steam session inside gamescope (STEAM_GAMESCOPE). 'off' is the compatible path: Steam runs directly on the sway session."
+    }
+  ]
+}

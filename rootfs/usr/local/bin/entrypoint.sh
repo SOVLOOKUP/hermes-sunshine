@@ -79,6 +79,30 @@ start_avahi() {
     fi
 }
 
+# --- component center switches (set by the control plane) -------------------
+# The control plane only knows component names; this mapping is the image's side
+# of that contract. Unknown names are ignored on purpose: a newer control plane
+# must not be able to break an older image.
+apply_component_env() {
+    # Canonical values only: start_compositor() switches on true/false/auto and
+    # anything else falls through to "auto" — so writing "on"/"off" here would
+    # silently turn "off" into "prefer HDR whenever the module supports it".
+    case "${HERMES_COMPONENT_HDR:-}" in
+        1 | true | TRUE) ENABLE_HDR="true" ;;
+        0 | false | FALSE) ENABLE_HDR="false" ;;
+    esac
+    case "${HERMES_COMPONENT_STEAM_GAMESCOPE:-}" in
+        1 | true | TRUE) STEAM_GAMESCOPE="true" ;;
+        0 | false | FALSE) STEAM_GAMESCOPE="false" ;;
+    esac
+    # Hermes launches the Steam app as a child process, so the switch only takes
+    # effect if it is in the environment — a plain shell assignment is invisible
+    # to hermes-steam-session. Export it unconditionally (also keeps a value the
+    # user exported via compose).
+    export STEAM_GAMESCOPE
+}
+apply_component_env
+
 # --- device detection: Hermes-KMS virtual display + real render GPU ---------
 HERMES_KMS_CARD="${HERMES_KMS_CARD:-}" # DRM card node backed by the host hermes_kms.ko module (override via env)
 RENDER_NODE="${RENDER_NODE:-}"         # real GPU render node used for rendering + encoding (override via env)
@@ -624,7 +648,7 @@ start_compositor() {
     # the config otherwise, so an SDR module is never asked for HDR.
     local hdr_on="false"
     case "${ENABLE_HDR:-auto}" in
-        true|1|yes|prefer)
+        true|1|yes|prefer|on)
             if [ "${use_kms}" = "true" ] && [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]; then
                 hdr_on="true"
                 log "HDR: enabled on Virtual-1 in sway (ENABLE_HDR=${ENABLE_HDR})"
@@ -632,7 +656,7 @@ start_compositor() {
                 warn "ENABLE_HDR requested, but hermes_kms kernel module is not loaded with hdr_enable=Y"
             fi
             ;;
-        false|0|no)
+        false|0|no|off)
             hdr_on="false"
             log "HDR: disabled (ENABLE_HDR=${ENABLE_HDR})"
             ;;
@@ -1332,6 +1356,12 @@ configure_virtual_displays
 configure_steam_app
 ensure_clipboard_wrappers
 check_stream_ports
+# Per-client limits from the control plane (bitrate / fps / FEC). Applied once,
+# here, because Hermes reads them when a stream starts.
+if [ -x /usr/local/bin/hermes-apply-profile.sh ]; then
+    /usr/local/bin/hermes-apply-profile.sh || warn "hermes-apply-profile failed; continuing with the existing config"
+fi
+
 log "launching hermes with config: ${HERMES_CONFIG}"
 web_port=$(( ${PORT:-47989} + 1 ))
 log "web UI will be available at https://<host>:${web_port}"
