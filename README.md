@@ -128,8 +128,14 @@ ls -l /dev/dri                  # a new virtual card + render node appears
 ### Host readiness preflight (optional)
 
 `scripts/hermes-kms-guard` is a read-only wrapper around the module's runtime
-state. Its `preflight` command answers "would a DKMS build work on this host
-right now?" without modifying anything:
+state. Its `install` is the one write path: it runs upstream's
+`make dkms-install`, then builds upstream's small `hermes-kmsctl` helper and
+installs it to `/usr/local/bin/hermes-kmsctl` (falling back to its state
+directory). The module has no sysfs attribute for its UAPI number, so without
+that helper `status`/`verify` can only warn that the live ABI is unverified;
+with it, they compare the running UAPI against the one this release expects and
+fail on a mismatch. Its `preflight` command answers "would a DKMS build work on
+this host right now?" without modifying anything:
 
 ```bash
 ./scripts/hermes-kms-guard preflight

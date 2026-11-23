@@ -8,8 +8,10 @@
 # / `make dkms-uninstall` and helper scripts, and this tool deliberately calls
 # those. It adds: a configurable source/ref/workdir, a safe rebuild that never
 # unloads a busy module, an unprivileged health check (module load state,
-# UAPI/version visibility, hdr_enable readability, Hermes render-node discovery
-# and read-only permissions), a read-only host build-readiness preflight (kernel
+# UAPI/version visibility — install builds and installs upstream's
+# `hermes-kmsctl` so the live ABI can actually be read — hdr_enable readability,
+# Hermes render-node discovery and read-only permissions), a read-only host
+# build-readiness preflight (kernel
 # headers, DKMS registration, immutable OS, Secure Boot, uinput/uhid), a bounded
 # polling watcher, and jq-free JSON.
 #
@@ -26,7 +28,7 @@
 set -euo pipefail
 umask 022
 
-readonly GUARD_VERSION="1.0.0"
+readonly GUARD_VERSION="1.1.0"
 
 # --- classified exit codes ---------------------------------------------------
 readonly EX_OK=0
@@ -291,15 +293,81 @@ node_readonly() {
   if (( (m & 8#022) == 0 )); then printf 'true'; else printf 'false'; fi
 }
 
+# --- the UAPI probe helper ---------------------------------------------------
+#
+# The module exposes no sysfs attribute for its UAPI number, so the only way to
+# compare the running ABI with the one this release expects is the small
+# `hermes-kmsctl` tool from the same source tree. It is looked up on PATH first
+# (a distro package or a previous install), then at the two paths we put it: a
+# real PATH entry and the state directory. Building and installing it is part of
+# `install` — otherwise a correctly installed host reports "UAPI version not
+# visible" forever, because nothing ever provided the tool.
+KMSCTL_NAME="hermes-kmsctl"
+# Where `install` puts the helper. Overridable so the test harness (and a host
+# that keeps its tools elsewhere) never has to write to the real /usr/local/bin.
+KMSCTL_INSTALL="${GUARD_KMSCTL_INSTALL_PATH:-/usr/local/bin/$KMSCTL_NAME}"
+
+# Print the first usable hermes-kmsctl path; returns 1 when there is none.
+kmsctl_bin() {
+  local cand
+  if cand="$(command -v "$KMSCTL_NAME" 2>/dev/null)" && [[ -n "$cand" ]]; then
+    printf '%s' "$cand"
+    return 0
+  fi
+  for cand in "$KMSCTL_INSTALL" "/usr/local/bin/$KMSCTL_NAME" "$STATE_DIR/kmsctl"; do
+    if [[ -x "$cand" ]]; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Build the static helper from an upstream source tree and put it where
+# kmsctl_bin() will find it. Best effort: on a host that cannot build it the
+# module still works, we only lose the ABI cross-check (a warning, never a
+# failure), so every caller treats a non-zero return as advisory.
+ensure_kmsctl() {
+  local src="$1" out want
+  [[ -n "$src" && -f "$src/tools/hermes-kmsctl/hermes_kmsctl.c" ]] || return 1
+  # Already on PATH as a real command: nothing to do.
+  if command -v "$KMSCTL_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v gcc >/dev/null 2>&1; then
+    warn "gcc is not installed; cannot build $KMSCTL_NAME, so the UAPI check stays unverified"
+    return 1
+  fi
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  out="$STATE_DIR/kmsctl"
+  info "building $KMSCTL_NAME to read the live UAPI version"
+  if ! gcc -static -O2 -I"$src/include/uapi" \
+      "$src/tools/hermes-kmsctl/hermes_kmsctl.c" -o "$out" 2>/dev/null; then
+    warn "could not build $KMSCTL_NAME; the UAPI check stays unverified"
+    return 1
+  fi
+  chmod 0755 "$out" 2>/dev/null || true
+  want="$KMSCTL_INSTALL"
+  if [[ -n "$want" && -d "$(dirname "$want")" ]]; then
+    if install -m 0755 "$out" "$want" 2>/dev/null; then
+      info "installed $want"
+    else
+      warn "could not write $want; using $out instead"
+    fi
+  fi
+  return 0
+}
+
 resolve_version() {
   H_DRIVER_VERSION=""
   H_VERSION_SOURCE=""
   H_UAPI=""
   H_UAPI_VISIBLE=false
 
-  if command -v hermes-kmsctl >/dev/null 2>&1; then
+  local kctl
+  if kctl="$(kmsctl_bin)"; then
     local out
-    out="$(hermes-kmsctl --verbose version 2>/dev/null || true)"
+    out="$("$kctl" --verbose version 2>/dev/null || true)"
     if [[ -n "$out" ]]; then
       H_UAPI="$(sed -n 's/^uapi_version=//p' <<<"$out" | head -n1 || true)"
       H_DRIVER_VERSION="$(sed -n 's/^driver_version=//p' <<<"$out" | head -n1 || true)"
@@ -692,7 +760,7 @@ collect_health() {
       add_check uapi ok "uapi $H_UAPI"
     fi
   else
-    add_check uapi warn "UAPI version not visible (needs hermes-kmsctl or manual query)"
+    add_check uapi warn "UAPI version not visible (run the guard install, or build hermes-kmsctl)"
     add_warn uapi "UAPI version not visible for the loaded module"
   fi
 
@@ -1084,6 +1152,10 @@ rebuild_once() {
     return "$EX_UPSTREAM"
   fi
 
+  # A rebuild is also when a fresh source tree is available: refresh the helper
+  # so the re-verification below has a real UAPI number to compare.
+  ensure_kmsctl "$SRCDIR" || true
+
   info "loading rebuilt module"
   if ! modprobe hermes_kms; then
     err "modprobe hermes_kms failed after rebuild"
@@ -1139,6 +1211,9 @@ cmd_install() {
   if ! make -C "$SRCDIR" dkms-install; then
     die "$EX_UPSTREAM" "upstream 'make dkms-install' failed"
   fi
+  # The module has no sysfs UAPI attribute; ship the query tool alongside it so
+  # the very next status check can verify the ABI instead of warning about it.
+  ensure_kmsctl "$SRCDIR" || true
   info "install finished via upstream dkms-install"
   return 0
 }
@@ -1252,7 +1327,7 @@ USAGE
   $(basename "$0") <command> [options]
 
 COMMANDS
-  install      Build and install the module via upstream 'make dkms-install'   (root)
+  install      Build/install the module (upstream 'make dkms-install') + hermes-kmsctl  (root)
   uninstall    Remove the module via upstream 'make dkms-uninstall', then unload (root)
   rebuild      Safely rebuild and reload; refuses to unload a busy module       (root)
   verify       Check loaded module, UAPI/version, hdr_enable, render node & perms

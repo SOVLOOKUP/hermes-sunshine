@@ -147,7 +147,7 @@ setup_env() {
   SRC="$ENV/src"
   MODULES="$ENV/modules"
   KERNEL_RELEASE="$(uname -r)"
-  mkdir -p "$DEV" "$SRC" "$MODULES/$KERNEL_RELEASE/build"
+  mkdir -p "$DEV" "$SRC" "$MODULES/$KERNEL_RELEASE/build" "$ENV/pathbin"
   : > "$FAKELOG"
   : > "$PROC"
   : > "$ENV/dev/uinput"; chmod 0666 "$ENV/dev/uinput"
@@ -183,6 +183,7 @@ rung() {
          GUARD_DEV_UHID="$ENV/dev/uhid" \
          GUARD_SECURE_BOOT="$SECURE_BOOT" \
          GUARD_STATE_DIR="$ENV/state" \
+         GUARD_KMSCTL_INSTALL_PATH="$ENV/pathbin/hermes-kmsctl" \
          GUARD_TEST_ALLOW_NONROOT="$ALLOW_NR" \
          PATH="$BIN:$PATH" \
          DKMS_VER="$DKMS_VER" \
@@ -318,6 +319,62 @@ rung status --json
 eq "uapi mismatch exit 10" "$RC" "10"
 eq "uapi mismatch exit_code 10" "$(json_field "$OUT" exit_code)" "10"
 eq "uapi mismatch expected 14" "$(json_field "$OUT" uapi.expected)" "14"
+
+# --- the UAPI helper is found off PATH too -----------------------------------
+# The appliance runs the guard with a minimal PATH, so `hermes-kmsctl` is often
+# not a command there. `install` writes the binary into the state directory, and
+# the probe has to look for it there instead of giving up with a warning.
+setup_env
+add_render "$SYS" renderD128 hermes-kms general
+: > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+mkdir -p "$ENV/state"
+cat > "$ENV/state/kmsctl" <<'EOS'
+#!/usr/bin/env bash
+printf 'driver_version=0.4.1\nuapi_version=14\n'
+EOS
+chmod 0755 "$ENV/state/kmsctl"
+rung status --json
+eq "state-dir kmsctl exit 0" "$RC" "0"
+eq "state-dir kmsctl reads uapi" "$(json_field "$OUT" uapi.version)" "14"
+eq "state-dir kmsctl uapi visible" "$(json_field "$OUT" uapi.visible)" "True"
+mv "$BIN/hermes-kmsctl.off" "$BIN/hermes-kmsctl"
+
+# --- no helper anywhere: degraded but honest, never a hard error -------------
+setup_env
+add_render "$SYS" renderD128 hermes-kms general
+: > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+rm -f "$ENV/state/kmsctl"
+rung status --json
+eq "no kmsctl is degraded" "$RC" "20"
+eq "no kmsctl uapi not visible" "$(json_field "$OUT" uapi.visible)" "False"
+eq "no kmsctl status degraded" "$(json_field "$OUT" status)" "degraded"
+has "no kmsctl warns about the tool" "$OUT" "UAPI version not visible"
+mv "$BIN/hermes-kmsctl.off" "$BIN/hermes-kmsctl"
+
+# --- install builds and places the helper when the host has none -------------
+setup_env
+if ! command -v gcc >/dev/null 2>&1; then
+  skip "install builds hermes-kmsctl (gcc not available)"
+else
+  mkdir -p "$SRC/include/uapi" "$SRC/tools/hermes-kmsctl"
+  cat > "$SRC/tools/hermes-kmsctl/hermes_kmsctl.c" <<'EOS'
+#include <stdio.h>
+int main(void) { printf("driver_version=0.4.1\nuapi_version=14\n"); return 0; }
+EOS
+  mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+  rung install
+  eq "install with module build exits 0" "$RC" "0"
+  if [[ -x "$ENV/pathbin/hermes-kmsctl" ]]; then
+    ok "install placed hermes-kmsctl on the install path"
+  else
+    notok "install did not place hermes-kmsctl (want $ENV/pathbin/hermes-kmsctl)"
+  fi
+  eq "built helper reports the live uapi" \
+     "$("$ENV/pathbin/hermes-kmsctl" --verbose version 2>/dev/null | sed -n 's/^uapi_version=//p')" "14"
+  mv "$BIN/hermes-kmsctl.off" "$BIN/hermes-kmsctl"
+fi
 
 # --- render-node identification is never assumed (no renderD129) -------------
 setup_env
