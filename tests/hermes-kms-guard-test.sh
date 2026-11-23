@@ -376,6 +376,39 @@ EOS
   mv "$BIN/hermes-kmsctl.off" "$BIN/hermes-kmsctl"
 fi
 
+# --- `helper` builds the tool from the on-disk tree, never fetching -----------
+setup_env
+mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+rung helper
+eq "helper without source exits 0" "$RC" "0"
+has "helper says the tool is still missing" "$OUT$ERRTXT" "still missing"
+hasnt "helper never cloned" "$(cat "$FAKELOG")" "git clone"
+
+if ! command -v gcc >/dev/null 2>&1; then
+  skip "helper builds from the tree (gcc not available)"
+else
+  setup_env
+  add_render "$SYS" renderD128 hermes-kms general
+  : > "$DEV/renderD128"; chmod 0644 "$DEV/renderD128"
+  mkdir -p "$SRC/include/uapi" "$SRC/tools/hermes-kmsctl"
+  cat > "$SRC/tools/hermes-kmsctl/hermes_kmsctl.c" <<'EOS'
+#include <stdio.h>
+int main(void) { printf("driver_version=0.4.1\nuapi_version=14\n"); return 0; }
+EOS
+  mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+  rung helper
+  eq "helper builds from the tree" "$RC" "0"
+  hasnt "helper did not fetch" "$(cat "$FAKELOG")" "git clone"
+  if [[ -x "$ENV/state/kmsctl" ]]; then
+    ok "helper left a kmsctl in the state directory"
+  else
+    notok "helper did not build kmsctl"
+  fi
+  rung status --json
+  eq "status reads the helper's uapi" "$(json_field "$OUT" uapi.version)" "14"
+  eq "status is healthy with the helper" "$RC" "0"
+fi
+
 # --- render-node identification is never assumed (no renderD129) -------------
 setup_env
 add_render "$SYS" renderD128 amdgpu general

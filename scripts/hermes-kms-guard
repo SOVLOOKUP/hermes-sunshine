@@ -74,6 +74,8 @@ CYCLES=0
 DO_REBUILD=0
 NO_UNLOAD=0
 SKIP_PREFLIGHT=0
+# Set by `helper`: build from a checkout already on disk, never fetch anything.
+NO_CLONE=0
 
 SRCDIR=""
 
@@ -232,6 +234,11 @@ resolve_source() {
     SRCDIR="$dir"
     info "reusing source: $SRCDIR"
     return 0
+  fi
+
+  if (( NO_CLONE )); then
+    warn "no checkout at $dir and fetching is disabled for this command"
+    return 1
   fi
 
   if ! command -v git >/dev/null 2>&1; then
@@ -1265,6 +1272,28 @@ cmd_status() {
   return "$H_EXIT"
 }
 
+# cmd_helper — build/install 'hermes-kmsctl' from a checkout already on disk,
+# without fetching anything and without touching the module. The appliance calls
+# this at start-up when the module looks healthy but the live UAPI cannot be
+# read, so a "degraded because the tool is missing" host can heal in seconds
+# instead of paying for a network clone or a module rebuild.
+cmd_helper() {
+  if kmsctl_bin >/dev/null 2>&1; then
+    info "$KMSCTL_NAME: $(kmsctl_bin)"
+    return "$EX_OK"
+  fi
+  NO_CLONE=1
+  if resolve_source; then
+    ensure_kmsctl "$SRCDIR" || true
+  fi
+  if kmsctl_bin >/dev/null 2>&1; then
+    info "$KMSCTL_NAME: $(kmsctl_bin)"
+  else
+    warn "$KMSCTL_NAME is still missing; run 'install' once so the source is fetched and it is built"
+  fi
+  return "$EX_OK"
+}
+
 cmd_verify() {
   collect_health
   if (( JSON )); then print_status_json; else print_verify_text; fi
@@ -1334,6 +1363,7 @@ COMMANDS
   preflight    Check host build readiness (kernel headers, DKMS, ostree, Secure Boot, input)
   watch        Bounded polling health monitor; optional safe rebuild on failure
   status       Print current health; add --json for machine-readable output
+  helper       Build hermes-kmsctl from an on-disk checkout, never fetching (no-op if present)
   version      Print the wrapper version
   help         Show this help
 
@@ -1431,7 +1461,7 @@ main() {
       usage; exit 0 ;;
     version|--version)
       version; exit 0 ;;
-    install|uninstall|verify|preflight|rebuild|watch|status)
+    install|uninstall|verify|preflight|rebuild|watch|status|helper)
       parse_all "$@" ;;
     *)
       die "$EX_USAGE" "unknown command: $cmd (see --help)" ;;
@@ -1445,6 +1475,7 @@ main() {
     rebuild)   cmd_rebuild ;;
     watch)     cmd_watch ;;
     status)    cmd_status ;;
+    helper)    cmd_helper ;;
   esac
 }
 
