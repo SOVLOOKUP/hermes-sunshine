@@ -111,6 +111,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
 # session simply falls back to downloading the client itself.
 RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     set -eu; \
+    pacman -Sy --noconfirm; \
     pacman -S --noconfirm --needed xorg-server-xvfb procps-ng; \
     rm -rf /opt/steam-seed; install -d -o steam -g steam /opt/steam-seed; \
     install -d -o steam -g steam -m 700 /tmp/steam-seed-runtime; \
