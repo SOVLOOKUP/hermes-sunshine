@@ -79,7 +79,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     pacman -U --noconfirm /tmp/hermes.pkg.tar.zst; \
     rm -f /tmp/hermes.pkg.tar.zst; \
     pacman -S --noconfirm --needed \
-        curl libva-utils dbus avahi mesa sway swaybg seatd xorg-xhost xorg-xwayland xorg-xauth xorg-xdpyinfo \
+        curl libva-utils dbus avahi mesa sway swaybg seatd xorg-xhost xorg-xwayland xorg-xauth xorg-xdpyinfo xorg-server-xvfb \
         wl-clipboard xclip foot wofi jq \
         pipewire pipewire-pulse pipewire-audio wireplumber libpulse tzdata \
         steam gamescope noto-fonts wqy-zenhei \
@@ -100,6 +100,43 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     if [ -f /usr/bin/wl-copy ]; then mv -f /usr/bin/wl-copy /usr/bin/wl-copy.real; fi; \
     if [ -f /usr/bin/wl-paste ]; then mv -f /usr/bin/wl-paste /usr/bin/wl-paste.real; fi; \
     if [ -f /usr/bin/xclip ]; then mv -f /usr/bin/xclip /usr/bin/xclip.real; fi
+
+# Pre-install the Steam client into the image, so the first stream does not have
+# to download ~500 MB while the user stares at an empty desktop. Steam refuses to
+# run as root and wants an X display, so bootstrap it as the steam user under
+# Xvfb, then keep the payload in /opt/steam-seed.
+# hermes-steam-session copies the seed into /config/steam the first time a
+# session starts (see rootfs/usr/local/bin/hermes-steam-session).
+# Best effort: if the download fails the build still succeeds and the first
+# session simply falls back to downloading the client itself.
+RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
+    set -eu; \
+    pacman -S --noconfirm --needed xorg-server-xvfb procps-ng; \
+    rm -rf /opt/steam-seed; install -d -o steam -g steam /opt/steam-seed; \
+    install -d -o steam -g steam -m 700 /tmp/steam-seed-runtime; \
+    su steam -s /bin/bash -c 'export HOME=/opt/steam-seed XDG_RUNTIME_DIR=/tmp/steam-seed-runtime; exec xvfb-run -a -s "-screen 0 1280x720x24" /usr/bin/steam -gamepadui' >/tmp/steam-seed.log 2>&1 & \
+    echo $! >/tmp/steam-seed.pid; \
+    prev=0; stable=0; ok=0; \
+    for i in $(seq 1 90); do \
+        sleep 10; \
+        cur="$(du -sk /opt/steam-seed 2>/dev/null | cut -f1 || echo 0)"; \
+        if [ -x /opt/steam-seed/.local/share/Steam/ubuntu12_32/steam ] && [ "${cur:-0}" -gt 200000 ]; then \
+            if [ "${cur}" = "${prev}" ]; then stable=$((stable + 1)); else stable=0; fi; \
+            if [ "${stable}" -ge 3 ]; then ok=1; break; fi; \
+        fi; \
+        prev="${cur:-0}"; \
+    done; \
+    kill "$(cat /tmp/steam-seed.pid)" 2>/dev/null || true; \
+    pkill -9 -u steam 2>/dev/null || true; pkill -9 Xvfb 2>/dev/null || true; \
+    sleep 2; \
+    echo '--- steam seed log tail ---'; tail -n 20 /tmp/steam-seed.log 2>/dev/null || true; \
+    if [ "${ok}" = "1" ]; then \
+        echo "steam client seeded: $(du -sh /opt/steam-seed | cut -f1)"; \
+    else \
+        echo 'WARN: steam client seed incomplete; the first session will download it'; \
+        rm -rf /opt/steam-seed; install -d -o steam -g steam /opt/steam-seed; \
+    fi; \
+    rm -rf /tmp/steam-seed.log /tmp/steam-seed.pid /tmp/steam-seed-runtime
 
 COPY rootfs/ /
 RUN chmod +x /usr/local/bin/* /usr/bin/wl-copy /usr/bin/wl-paste /usr/bin/xclip 2>/dev/null || true

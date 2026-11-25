@@ -480,9 +480,12 @@ How it works and what to know:
   drawable` in the game log). Either way the session is **relaunched fresh per
   connection** (Steam is not kept warm); set `AUTOSTART_STEAM=false` to leave the
   app unregistered and boot to the plain desktop instead.
-- **First run is slower.** Because Steam starts fresh each connection, the very
-  first stream re-runs Steam's bootstrap ("Setting up Steam content"). That data
-  lives in `/config/steam` (below), so every subsequent connection comes up fast.
+- **Steam client ships pre-installed.** The image bootstraps the Steam client at
+  build time and keeps it in `/opt/steam-seed`; the first session copies it into
+  `/config/steam` instead of downloading ~500 MB behind an empty desktop (the
+  seed is built once, into the image). After that the client data lives in
+  `/config/steam`, so every subsequent connection comes up fast. Steam can still
+  fetch its own incremental updates on launch, as usual.
 - **D-Bus session bus.** Since the 2026-10-16 client build Steam boots through the
   SteamRT3 client: the updater re-execs the client into the Steam Linux Runtime,
   and `steam-runtime-launcher-service` needs a D-Bus *session* bus for that
