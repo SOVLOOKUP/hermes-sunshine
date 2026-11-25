@@ -117,21 +117,27 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     install -d -o steam -g steam -m 700 /tmp/steam-seed-runtime; \
     su steam -s /bin/bash -c 'export HOME=/opt/steam-seed XDG_RUNTIME_DIR=/tmp/steam-seed-runtime; exec xvfb-run -a -s "-screen 0 1280x720x24" /usr/bin/steam -gamepadui' >/tmp/steam-seed.log 2>&1 & \
     echo $! >/tmp/steam-seed.pid; \
-    prev=0; stable=0; ok=0; \
+    prev=0; stable=0; ok=0; stall=0; \
     for i in $(seq 1 120); do \
         sleep 20; \
         cur="$(du -sk /opt/steam-seed 2>/dev/null | cut -f1 || echo 0)"; \
-        if [ $((i % 3)) -eq 0 ]; then echo "steam seed progress: ${cur:-0} KB"; fi; \
+        if [ "${cur:-0}" -gt "${prev:-0}" ]; then stall=0; else stall=$((stall + 1)); fi; \
+        if [ $((i % 3)) -eq 0 ]; then echo "steam seed progress: ${cur:-0} KB (no growth for ${stall} samples)"; fi; \
+        if [ "${stall}" -ge 12 ] && [ "${cur:-0}" -gt 0 ]; then echo 'steam seed stopped growing; giving up early'; break; fi; \
         if [ -x /opt/steam-seed/.local/share/Steam/ubuntu12_32/steam ] && [ "${cur:-0}" -gt 300000 ]; then \
             if [ "${cur}" = "${prev}" ]; then stable=$((stable + 1)); else stable=0; fi; \
             if [ "${stable}" -ge 4 ]; then ok=1; break; fi; \
         fi; \
         prev="${cur:-0}"; \
     done; \
+    echo '--- steam processes at the end ---'; ps -eo pid,user,stat,args 2>/dev/null | grep -i 'steam\|xvfb' | grep -v grep | cut -c1-140 | head -20 || true; \
+    echo '--- seed tree ---'; ls -la /opt/steam-seed/.local/share/Steam 2>/dev/null | head -20 || true; \
     kill "$(cat /tmp/steam-seed.pid)" 2>/dev/null || true; \
     pkill -9 -u steam 2>/dev/null || true; pkill -9 Xvfb 2>/dev/null || true; \
     sleep 2; \
     echo '--- steam seed log tail ---'; tail -n 20 /tmp/steam-seed.log 2>/dev/null || true; \
+    echo '--- bootstrap log ---'; tail -n 30 /opt/steam-seed/.local/share/Steam/logs/bootstrap_log.txt 2>/dev/null || true; \
+    echo '--- console log ---'; tail -n 30 /opt/steam-seed/.local/share/Steam/logs/console-linux.txt 2>/dev/null || true; \
     if [ "${ok}" = "1" ]; then \
         echo "steam client seeded: $(du -sh /opt/steam-seed | cut -f1)"; \
     else \
