@@ -175,7 +175,7 @@ rung() {
   OUT="$(GUARD_SYSFS_ROOT="$SYS" \
          GUARD_DEV_DRI="$DEV" \
          GUARD_PROC_MODULES="$PROC" \
-         GUARD_SOURCE="$SRC" \
+         GUARD_SOURCE="${GUARD_SOURCE_OVERRIDE-$SRC}" \
          GUARD_MODULES_ROOT="$MODULES" \
          GUARD_KERNEL_RELEASE="$KERNEL_RELEASE" \
          GUARD_OSTREE_MARKER="$ENV/ostree-booted" \
@@ -408,6 +408,17 @@ EOS
   eq "status reads the helper's uapi" "$(json_field "$OUT" uapi.version)" "14"
   eq "status is healthy with the helper" "$RC" "0"
 fi
+
+# --- `helper --fetch` may clone when no checkout survives ---------------------
+# The appliance calls this at start-up so a host whose /var checkout was wiped
+# still heals without the user running anything by hand; it must still refuse to
+# touch the module and must not fetch on the plain `helper` path.
+setup_env
+mv "$BIN/hermes-kmsctl" "$BIN/hermes-kmsctl.off"
+GUARD_SOURCE_OVERRIDE="" GUARD_WORKDIR_OVERRIDE=1 rung helper --fetch
+eq "helper --fetch exits 0 even when the clone fails" "$RC" "0"
+has "helper --fetch attempted a clone" "$(cat "$FAKELOG")" "git clone"
+hasnt "helper --fetch never builds the module" "$(cat "$FAKELOG")" "dkms-install"
 
 # --- render-node identification is never assumed (no renderD129) -------------
 setup_env

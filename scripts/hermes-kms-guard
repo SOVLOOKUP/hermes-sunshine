@@ -28,7 +28,7 @@
 set -euo pipefail
 umask 022
 
-readonly GUARD_VERSION="1.1.0"
+readonly GUARD_VERSION="1.2.0"
 
 # --- classified exit codes ---------------------------------------------------
 readonly EX_OK=0
@@ -74,8 +74,11 @@ CYCLES=0
 DO_REBUILD=0
 NO_UNLOAD=0
 SKIP_PREFLIGHT=0
-# Set by `helper`: build from a checkout already on disk, never fetch anything.
+# Set by `helper`: build from a checkout already on disk and never fetch
+# anything. `helper --fetch` clears it so the appliance can heal a host that
+# has no checkout left, without a full `install` (no DKMS, no module touch).
 NO_CLONE=0
+FETCH=0
 
 SRCDIR=""
 
@@ -1283,6 +1286,12 @@ cmd_helper() {
     return "$EX_OK"
   fi
   NO_CLONE=1
+  # `helper --fetch` exists for the appliance: run at start-up in the
+  # background it may clone the pinned ref when no checkout survives, but it
+  # still builds only the UAPI tool and never touches the module.
+  if (( FETCH )); then
+    NO_CLONE=0
+  fi
   if resolve_source; then
     ensure_kmsctl "$SRCDIR" || true
   fi
@@ -1363,7 +1372,8 @@ COMMANDS
   preflight    Check host build readiness (kernel headers, DKMS, ostree, Secure Boot, input)
   watch        Bounded polling health monitor; optional safe rebuild on failure
   status       Print current health; add --json for machine-readable output
-  helper       Build hermes-kmsctl from an on-disk checkout, never fetching (no-op if present)
+  helper       Build hermes-kmsctl from an on-disk checkout, no module change (--fetch
+               lets it clone the pinned ref when no checkout survives; no-op if present)
   version      Print the wrapper version
   help         Show this help
 
@@ -1379,6 +1389,7 @@ OPTIONS
   --rebuild         watch: attempt a safe rebuild when unhealthy (needs root)
   --no-unload       uninstall: remove the DKMS registration but leave the module loaded
   --skip-preflight  install/rebuild: continue even if host preflight fails (not recommended)
+  --fetch           helper: clone the pinned ref when no checkout is on disk
   -h, --help        Show this help
   --version         Print the wrapper version
 
@@ -1432,6 +1443,8 @@ parse_all() {
         [[ $# -ge 2 ]] || die "$EX_USAGE" "--cycles needs a value"
         parse_int "--cycles" "$2"
         CYCLES="$2"; shift 2 ;;
+      --fetch)
+        FETCH=1; shift ;;
       --rebuild)
         DO_REBUILD=1; shift ;;
       --no-unload)
