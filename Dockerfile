@@ -105,6 +105,15 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
 # to download ~500 MB while the user stares at an empty desktop. Steam refuses to
 # run as root and wants an X display, so bootstrap it as the steam user under
 # Xvfb, then keep the payload in /opt/steam-seed.
+#
+# The client's launcher probes bubblewrap before it will start, and inside a
+# docker build that probe fails ("bwrap: No permissions to create a new
+# namespace") because build steps get Docker's default seccomp and AppArmor
+# profiles. Steam then pops a zenity dialog and waits for a click forever, which
+# is what stalled the earlier seeds at 76 MB. At run time we already hand the
+# container seccomp=unconfined and apparmor=unconfined, so the probe passes
+# there; for the seed we only need the download, so shadow bwrap with a no-op
+# for the duration of this step and put the real one back afterwards.
 # hermes-steam-session copies the seed into /config/steam the first time a
 # session starts (see rootfs/usr/local/bin/hermes-steam-session).
 # Best effort: if the download fails the build still succeeds and the first
@@ -113,6 +122,8 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     set -eu; \
     pacman -Sy --noconfirm; \
     pacman -S --noconfirm --needed xorg-server-xvfb procps-ng; \
+    if [ -x /usr/bin/bwrap ]; then mv -f /usr/bin/bwrap /usr/bin/bwrap.real; fi; \
+    printf '#!/bin/sh\nexit 0\n' > /usr/bin/bwrap; chmod 0755 /usr/bin/bwrap; \
     rm -rf /opt/steam-seed; install -d -o steam -g steam /opt/steam-seed; \
     install -d -o steam -g steam -m 700 /tmp/steam-seed-runtime; \
     su steam -s /bin/bash -c 'export HOME=/opt/steam-seed XDG_RUNTIME_DIR=/tmp/steam-seed-runtime; exec xvfb-run -a -s "-screen 0 1280x720x24" /usr/bin/steam -gamepadui' >/tmp/steam-seed.log 2>&1 & \
@@ -143,6 +154,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     else \
         echo "WARN: steam client seed incomplete ($(du -sh /opt/steam-seed | cut -f1) kept, the first session resumes it)"; \
     fi; \
+    if [ -f /usr/bin/bwrap.real ]; then mv -f /usr/bin/bwrap.real /usr/bin/bwrap; fi; \
     rm -rf /tmp/steam-seed.log /tmp/steam-seed.pid /tmp/steam-seed-runtime
 
 COPY rootfs/ /
