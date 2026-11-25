@@ -200,10 +200,12 @@ trap cleanup_session EXIT INT TERM
 # has to sit through the ~500 MB first-run download behind an empty desktop. The
 # image ships a bootstrapped client in /opt/steam-seed (see the Dockerfile);
 # copy it into the persistent per-session HOME only when the client is not there
-# yet, so later sessions and Steam's own updates are left alone. Never fatal.
+# yet, so later sessions and Steam's own updates are left alone. A partial seed
+# is still worth copying: Steam resumes from the packages it already has.
+# Never fatal.
 STEAM_HOME=/config/steam
 if [ ! -x "${STEAM_HOME}/.local/share/Steam/ubuntu12_32/steam" ] \
-    && [ -x /opt/steam-seed/.local/share/Steam/ubuntu12_32/steam ]; then
+    && [ -d /opt/steam-seed/.local/share/Steam ]; then
     log "seeding the Steam client from the image (skips the first-run download)"
     install -d "${STEAM_HOME}" 2>/dev/null || true
     if cp -a /opt/steam-seed/. "${STEAM_HOME}/" 2>/dev/null; then

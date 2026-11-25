@@ -118,12 +118,13 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     su steam -s /bin/bash -c 'export HOME=/opt/steam-seed XDG_RUNTIME_DIR=/tmp/steam-seed-runtime; exec xvfb-run -a -s "-screen 0 1280x720x24" /usr/bin/steam -gamepadui' >/tmp/steam-seed.log 2>&1 & \
     echo $! >/tmp/steam-seed.pid; \
     prev=0; stable=0; ok=0; \
-    for i in $(seq 1 90); do \
-        sleep 10; \
+    for i in $(seq 1 120); do \
+        sleep 20; \
         cur="$(du -sk /opt/steam-seed 2>/dev/null | cut -f1 || echo 0)"; \
-        if [ -x /opt/steam-seed/.local/share/Steam/ubuntu12_32/steam ] && [ "${cur:-0}" -gt 200000 ]; then \
+        if [ $((i % 3)) -eq 0 ]; then echo "steam seed progress: ${cur:-0} KB"; fi; \
+        if [ -x /opt/steam-seed/.local/share/Steam/ubuntu12_32/steam ] && [ "${cur:-0}" -gt 300000 ]; then \
             if [ "${cur}" = "${prev}" ]; then stable=$((stable + 1)); else stable=0; fi; \
-            if [ "${stable}" -ge 3 ]; then ok=1; break; fi; \
+            if [ "${stable}" -ge 4 ]; then ok=1; break; fi; \
         fi; \
         prev="${cur:-0}"; \
     done; \
@@ -134,8 +135,7 @@ RUN --mount=type=cache,target=/var/cache/pacman,sharing=locked \
     if [ "${ok}" = "1" ]; then \
         echo "steam client seeded: $(du -sh /opt/steam-seed | cut -f1)"; \
     else \
-        echo 'WARN: steam client seed incomplete; the first session will download it'; \
-        rm -rf /opt/steam-seed; install -d -o steam -g steam /opt/steam-seed; \
+        echo "WARN: steam client seed incomplete ($(du -sh /opt/steam-seed | cut -f1) kept, the first session resumes it)"; \
     fi; \
     rm -rf /tmp/steam-seed.log /tmp/steam-seed.pid /tmp/steam-seed-runtime
 
