@@ -242,7 +242,13 @@ if [ -n "${HERMES_GAMES_DIR:-}" ]; then
         || warn "games library registration failed (non-fatal); add ${HERMES_GAMES_DIR} manually in Steam settings if it is missing"
 fi
 
-log "launching Steam Big Picture (Gamepad UI)..."
+# Keep CEF (Big Picture's web engine) off the GPU. On the AMD + container + sway
+# stack its GPU compositing has been seen to wedge the whole captured frame:
+# the UI freezes right after login, the cursor and the stream overlay both stop,
+# yet the host stays healthy with no amdgpu reset. Software CEF is stable; games
+# still render on the GPU through the normal Vulkan/GL path. -no-cef-sandbox is
+# also required because the Chromium sandbox cannot initialise inside the box.
+log "launching Steam Big Picture (Gamepad UI, CEF software rendering)..."
 runuser -u steam -- env \
     HOME=/config/steam \
     XDG_RUNTIME_DIR="${runtime}" \
@@ -258,7 +264,7 @@ runuser -u steam -- env \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
     "${COMPOSITOR_CMD[@]}" \
-    steam -gamepadui
+    steam -gamepadui -cef-disable-gpu -cef-disable-gpu-compositing -no-cef-sandbox
 rc=$?
 
 log "Steam exited (rc=${rc}); terminating session."
