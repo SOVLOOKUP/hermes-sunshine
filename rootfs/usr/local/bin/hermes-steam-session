@@ -258,7 +258,7 @@ runuser -u steam -- env \
     "${TZ_ENV[@]}" \
     "${DBUS_WRAP[@]}" \
     "${COMPOSITOR_CMD[@]}" \
-    steam -gamepadui
+    steam -gamepadui -no-cef-sandbox
 rc=$?
 
 log "Steam exited (rc=${rc}); terminating session."
