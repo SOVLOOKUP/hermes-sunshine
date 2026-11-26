@@ -470,14 +470,14 @@ How it works and what to know:
 
 - **Per-session launch (native resolution).** "Steam Big Picture" is registered
   as a Hermes app, not a boot-time autostart. When a client streams it, Hermes
-  runs `steam -gamepadui` **directly on the session compositor**, at the stream's
-  **negotiated resolution/refresh** (`SUNSHINE_CLIENT_WIDTH`/`HEIGHT`/`FPS` —
-  Hermes sizes the `Virtual-1` output to it, so the picture is native, no
-  upscaling). Set `STEAM_GAMESCOPE=true` to run it nested inside gamescope
-  instead, which adds its own resolution/refresh clamping, FSR and HDR at the
-  price of one more compositing layer — and of gamescope's Xwayland, from which
-  some native Linux ports cannot get a usable GL drawable (`failed to create
-  drawable` in the game log). Either way the session is **relaunched fresh per
+  runs `steam -gamepadui` **nested inside gamescope** on the session compositor,
+  at the stream's **negotiated resolution/refresh** (`SUNSHINE_CLIENT_WIDTH`/
+  `HEIGHT`/`FPS` — Hermes sizes the `Virtual-1` output to it, so the picture is
+  native, no upscaling). gamescope gives steadier CEF compositing (no more
+  `failed to create drawable` freezes) plus FSR and HDR passthrough. Set
+  `STEAM_GAMESCOPE=false` to run Steam directly on the sway session instead —
+  the compatible fallback for the few native Linux ports that cannot get a
+  usable GL drawable from gamescope's Xwayland. Either way the session is **relaunched fresh per
   connection** (Steam is not kept warm); set `AUTOSTART_STEAM=false` to leave the
   app unregistered and boot to the plain desktop instead.
 - **Steam client ships pre-installed.** The image bootstraps the Steam client at
@@ -595,7 +595,7 @@ denied`.
 | `START_AVAHI`                  | `true`                  | Start avahi-daemon for Moonlight auto-discovery.                                                                                                                                |
 | `ENABLE_XWAYLAND`              | `true`                  | Run XWayland for X11-only applications.                                                                                                                                         |
 | `AUTOSTART_STEAM`              | `true`                  | Register Steam Big Picture as a per-session app (launched at the client's resolution when streamed). Set `false` to leave it unregistered (the shipped list then contains no apps at all). |
-| `STEAM_GAMESCOPE`              | `false`                 | Run Steam nested inside gamescope (`true`) or directly on the sway session (`false`, the compatible default). See [Steam Big Picture](#steam-big-picture).                       |
+| `STEAM_GAMESCOPE`              | `true`                  | Run Steam nested inside gamescope (`true`, the default: steadier compositing + HDR passthrough) or directly on the sway session (`false`, the compatible fallback). See [Steam Big Picture](#steam-big-picture).                       |
 | `HERMES_GAMES_DIR`             | _(unset)_               | Container path of a host bind-mounted shared games directory (e.g. `/games`). When set, the Steam launcher auto-registers it as a library folder before launch (idempotent, non-fatal). See [Steam Big Picture](#steam-big-picture). |
 | `WLR_RENDERER`                 | auto                    | wlroots renderer (`gles2` with GPU, else `pixman`).                                                                                                                             |
 | `HERMES_CONFIG`                | `/config/hermes.conf`   | Config file path (state is stored beside it).                                                                                                                                   |
@@ -622,7 +622,7 @@ image behaves exactly as documented above.
 | Variable                          | Values         | Effect                                                                                                                                              |
 | --------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HERMES_COMPONENT_HDR`            | `1` / `0`      | Forces `ENABLE_HDR=true` / `false`. Unset keeps `auto` (module capability decides).                                                                 |
-| `HERMES_COMPONENT_STEAM_GAMESCOPE` | `1` / `0`     | Forces `STEAM_GAMESCOPE=true` / `false`. Unset keeps the `STEAM_GAMESCOPE` default (`false`).                                                        |
+| `HERMES_COMPONENT_STEAM_GAMESCOPE` | `1` / `0`     | Forces `STEAM_GAMESCOPE=true` / `false`. Unset keeps the `STEAM_GAMESCOPE` default (`true`).                                                        |
 | `HERMES_MAX_BITRATE_KBPS`         | 1000–1000000   | Writes `max_bitrate` into `hermes.conf`. Out-of-range values are clamped with a warning, never fatal.                                                |
 | `HERMES_MAX_FPS`                  | ≥ 1            | Adds `fps_limit` to every app's `MANGOHUD_CONFIG` (merging with the options already there) plus `DXVK_FRAME_RATE` / `VKD3D_FRAME_RATE`.              |
 | `HERMES_FEC_PERCENTAGE`           | 1–50           | Writes `fec_percentage` into `hermes.conf`, overriding the adaptive controller for this container.                                                  |

@@ -84,6 +84,10 @@ start_avahi() {
 # of that contract. Unknown names are ignored on purpose: a newer control plane
 # must not be able to break an older image.
 apply_component_env() {
+    # gamescope now hosts Steam by default: steadier CEF compositing (no
+    # "failed to create drawable" freeze) plus HDR passthrough. An operator or
+    # the control plane can still set it off explicitly (HERMES_COMPONENT_...=0).
+    STEAM_GAMESCOPE="${STEAM_GAMESCOPE:-true}"
     # Canonical values only: start_compositor() switches on true/false/auto and
     # anything else falls through to "auto" — so writing "on"/"off" here would
     # silently turn "off" into "prefer HDR whenever the module supports it".

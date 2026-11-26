@@ -93,7 +93,7 @@ fi
 
 # Where Steam runs (see the header): "false" = directly on the sway session,
 # "true" = nested inside gamescope.
-STEAM_GAMESCOPE="${STEAM_GAMESCOPE:-false}"
+STEAM_GAMESCOPE="${STEAM_GAMESCOPE:-true}"
 
 # Ask sway which X display its Xwayland ended up on. Steam's UI is X11, and the
 # display number is not fixed (sway takes the first free one, which shifts

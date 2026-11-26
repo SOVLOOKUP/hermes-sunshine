@@ -22,8 +22,8 @@
       "tier": null,
       "env": "HERMES_COMPONENT_STEAM_GAMESCOPE",
       "states": ["on", "off"],
-      "default": "off",
-      "description": "Run the Steam session inside gamescope (STEAM_GAMESCOPE). 'off' is the compatible path: Steam runs directly on the sway session."
+      "default": "on",
+      "description": "Run the Steam session inside gamescope (STEAM_GAMESCOPE). 'on' is the default: steadier CEF compositing plus HDR passthrough. 'off' runs Steam directly on the sway session."
     }
   ]
 }
