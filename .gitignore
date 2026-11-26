@@ -36,3 +36,6 @@ nm-fake/Cargo.lock
 
 
 nm-fake/target/
+# Python bytecode
+__pycache__/
+*.pyc
