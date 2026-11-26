@@ -119,7 +119,34 @@ COMPOSITOR_CMD=()
 XENV=()
 if [ "${STEAM_GAMESCOPE}" = "true" ]; then
     command -v gamescope >/dev/null 2>&1 || { warn "gamescope not installed"; exit 0; }
-    COMPOSITOR_CMD=(gamescope -W "${W}" -H "${H}" -r "${R}" -f -e --)
+    COMPOSITOR_CMD=(gamescope -W "${W}" -H "${H}" -r "${R}" -f -e)
+    # HDR passthrough. sway drives HDR on the virtual output when the module
+    # advertises hdr_enable=Y (ENABLE_HDR auto/true; see entrypoint.sh), but a
+    # nested gamescope defaults to an SDR surface and washes the HDR output out.
+    # Ask gamescope to present HDR (--hdr-enabled) and inverse-tone-map SDR
+    # content such as Big Picture's own UI (--hdr-itm-enabled). Only when HDR is
+    # actually active: an explicit ENABLE_HDR=false, or an SDR module, stays SDR.
+    # Probe gamescope --help so an older build without these flags still starts.
+    hdr_want="false"
+    case "${ENABLE_HDR:-auto}" in
+        false | 0 | off | no) hdr_want="false" ;;
+        true | 1 | on | yes) hdr_want="true" ;;
+        *)
+            [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ] && hdr_want="true" ;;
+    esac
+    if [ "${hdr_want}" = "true" ]; then
+        gs_help="$(gamescope --help 2>&1 || true)"
+        if printf '%s\n' "${gs_help}" | grep -q -- '--hdr-enabled'; then
+            COMPOSITOR_CMD+=(--hdr-enabled)
+        else
+            warn "gamescope has no --hdr-enabled; HDR will not pass through"
+        fi
+        if printf '%s\n' "${gs_help}" | grep -q -- '--hdr-itm-enabled'; then
+            COMPOSITOR_CMD+=(--hdr-itm-enabled)
+        fi
+        log "compositor: gamescope HDR passthrough requested"
+    fi
+    COMPOSITOR_CMD+=(--)
     XENV=(XDG_CURRENT_DESKTOP=gamescope)
     log "compositor: gamescope ${W}x${H}@${R}"
 else
