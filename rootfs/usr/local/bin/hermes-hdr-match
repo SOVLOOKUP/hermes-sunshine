@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Match Sway Virtual-1 HDR mode to the client's requested dynamic range.
 # Invoked by Hermes as a prep-cmd before display capture initializes.
+#
+#   do    apply the mode this client needs, remembering what was there before
+#   undo  put the previous mode back when the session ends
+#
+# A non-HDR display that receives a PQ/BT.2020 stream looks washed out and
+# clips to white, so "client asked for SDR" must really mean SDR on the output
+# -- we verify it afterwards and say so loudly if Sway disagrees.
 set -euo pipefail
 
 action="${1:-do}"
@@ -12,30 +19,84 @@ fi
 [ -n "${SWAYSOCK:-}" ] && [ -S "${SWAYSOCK}" ] || exit 0
 command -v swaymsg >/dev/null 2>&1 || exit 0
 
+STATE_DIR="${HERMES_HDR_STATE_DIR:-/run/hermes}"
+[ -d "${STATE_DIR}" ] || STATE_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime}"
+STATE_FILE="${STATE_DIR}/hdr.prev"
+
 has_hdr_module() {
     [ "$(cat /sys/module/hermes_kms/parameters/hdr_enable 2>/dev/null || true)" = "Y" ]
 }
 
+# "on" / "off" / "" (key not exposed by this Sway build)
+current_hdr() {
+    local json
+    json="$(swaymsg -t get_outputs -r 2>/dev/null || true)"
+    [ -n "${json}" ] || return 0
+    printf '%s' "${json}" | jq -r '
+        [.[] | select(.name == "Virtual-1") | .hdr][0]
+        | if . == true then "on" elif . == false then "off" else empty end
+    ' 2>/dev/null || true
+}
+
+set_hdr() {
+    swaymsg output Virtual-1 "hdr" "$1" 2>/dev/null || true
+    sleep 0.1
+}
+
+# Make sure the output really ended up where we asked. Sway reports .hdr only
+# on builds that expose output colour transforms; when it does not, skip.
+enforce_hdr() {
+    local want="$1" now
+    set_hdr "${want}"
+    now="$(current_hdr)"
+    if [ -n "${now}" ] && [ "${now}" != "${want}" ]; then
+        sleep 0.2
+        set_hdr "${want}"
+        now="$(current_hdr)"
+        if [ -n "${now}" ] && [ "${now}" != "${want}" ]; then
+            echo "hermes-hdr-match: WARNING: asked for HDR ${want} but Virtual-1 still reports ${now}; the picture may look washed out" >&2
+        fi
+    fi
+}
+
 case "${action}" in
     undo|--undo)
-        # Restore default preference (HDR) when streaming session ends
-        if has_hdr_module; then
-            swaymsg output Virtual-1 hdr on 2>/dev/null || true
+        if [ -s "${STATE_FILE}" ]; then
+            previous="$(cat "${STATE_FILE}" 2>/dev/null || true)"
+            rm -f "${STATE_FILE}" 2>/dev/null || true
+            case "${previous}" in
+                on)
+                    if has_hdr_module; then enforce_hdr on; fi
+                    echo "hermes-hdr-match: restored HDR on"
+                    ;;
+                off)
+                    enforce_hdr off
+                    echo "hermes-hdr-match: restored HDR off"
+                    ;;
+            esac
+        elif has_hdr_module; then
+            # No record (older images): keep the historical default rather than
+            # guessing wrong; the next session's "do" corrects it anyway.
+            enforce_hdr on
         fi
         ;;
     do|*)
-        # A per-client profile can pin the mode; the profile wins over the client's
-        # request because the operator set it for this client.
+        # Remember what the output was doing before we touch it.
+        previous="$(current_hdr)"
+        if [ -n "${previous}" ]; then
+            printf '%s\n' "${previous}" > "${STATE_FILE}" 2>/dev/null || true
+        fi
+        # A per-client profile can pin the mode; the profile wins over the
+        # client's request because the operator set it for this client.
         case "${HERMES_HDR_MODE:-auto}" in
             off|sdr)
-                swaymsg output Virtual-1 hdr off 2>/dev/null || true
+                enforce_hdr off
                 echo "hermes-hdr-match: profile pins SDR"
                 exit 0
                 ;;
             hdr10|on)
                 if has_hdr_module; then
-                    swaymsg output Virtual-1 hdr on 2>/dev/null || true
-                    sleep 0.1
+                    enforce_hdr on
                 fi
                 exit 0
                 ;;
@@ -45,14 +106,14 @@ case "${action}" in
             1|true|TRUE|yes|YES)
                 # Client requested HDR: ensure Virtual-1 is in HDR mode
                 if has_hdr_module; then
-                    swaymsg output Virtual-1 hdr on 2>/dev/null || true
-                    sleep 0.1
+                    enforce_hdr on
                 fi
                 ;;
             *)
-                # Client requested SDR: fallback Virtual-1 to SDR so Hermes KMS capture succeeds without 503 error
-                swaymsg output Virtual-1 hdr off 2>/dev/null || true
-                sleep 0.1
+                # Client requested SDR: drop Virtual-1 to SDR so the KMS capture
+                # succeeds and the encoder produces 8-bit SDR, not PQ that a
+                # non-HDR screen would show washed out.
+                enforce_hdr off
                 ;;
         esac
         ;;

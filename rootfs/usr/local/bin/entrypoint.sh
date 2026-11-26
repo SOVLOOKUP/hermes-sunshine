@@ -1256,14 +1256,14 @@ configure_steam_app() {
     [ "${KMS_ZEROCOPY}" = "true" ] && vdisp="true"
     # Already wired to the launcher, matching vdisp, and has hdr-match prep-cmd?
     jq -e --arg cmd "${STEAM_SESSION_CMD}" --argjson vd "${vdisp}" \
-        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd and .["virtual-display"] == $vd and (.["prep-cmd"] // [] | any(.do == "/usr/local/bin/hermes-hdr-match")))' \
+        'any(.apps[]?; .name == "Steam Big Picture" and .cmd == $cmd and .["virtual-display"] == $vd and (.["prep-cmd"] // [] | any(.do == "/usr/local/bin/hermes-hdr-match" and .undo == "/usr/local/bin/hermes-hdr-match undo")))' \
         "${APPS_JSON}" >/dev/null 2>&1 && return 0
     local tmp; tmp="$(mktemp)"
     if jq --arg cmd "${STEAM_SESSION_CMD}" --arg img "${cover}" --argjson vd "${vdisp}" '
           def ensure_hdr_prep:
             .["prep-cmd"] = (
               [(.["prep-cmd"] // [])[] | select(.do | test("hermes-hdr-match") | not)] +
-              [{"do": "/usr/local/bin/hermes-hdr-match", "undo": ""}]
+              [{"do": "/usr/local/bin/hermes-hdr-match", "undo": "/usr/local/bin/hermes-hdr-match undo"}]
             );
           if any(.apps[]?; .name == "Steam Big Picture")
           then .apps |= map(if .name == "Steam Big Picture" then .cmd = $cmd | .["virtual-display"] = $vd | .["image-path"] = $img | ensure_hdr_prep else . end)
@@ -1272,7 +1272,7 @@ configure_steam_app() {
               "image-path": $img,
               "virtual-display": $vd,
               "allow-client-commands": false,
-              "prep-cmd": [{"do": "/usr/local/bin/hermes-hdr-match", "undo": ""}],
+              "prep-cmd": [{"do": "/usr/local/bin/hermes-hdr-match", "undo": "/usr/local/bin/hermes-hdr-match undo"}],
               "cmd": $cmd
           }]
           end

@@ -98,7 +98,7 @@ jobs:
     if: needs.resolve.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -172,3 +172,38 @@ jobs:
             HERMES_REF=${{ needs.resolve.outputs.hermes_ref }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Record the published version in versions.json so the control plane can
+      # read the version list from jsDelivr (cdn.jsdelivr.net) instead of the
+      # Docker Hub tags API, which is rate-limited and often unreachable from
+      # mainland China. The push uses GITHUB_TOKEN, and GitHub suppresses
+      # workflow runs triggered by GITHUB_TOKEN, so this never re-triggers the
+      # build. Only plain version tags are tracked; main/latest/PR refs are
+      # ignored by the helper script.
+      - name: Publish versions manifest
+        if: github.event_name != 'pull_request'
+        env:
+          HERMES_REF: ${{ needs.resolve.outputs.hermes_ref }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ref="${HERMES_REF}"
+          if ! printf '%s' "${ref}" | grep -Eq '^v?[0-9]+(\.[0-9]+)*$'; then
+            echo "::notice::${ref} is not a plain version tag; skipping versions.json"
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${tmp}"
+          python3 scripts/update_versions_manifest.py "${tmp}/versions.json" "${ref}"
+          cd "${tmp}"
+          if git diff --quiet -- versions.json; then
+            echo "::notice::versions.json already lists ${ref}; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          git commit -m "chore: record image version ${ref} in versions.json"
+          git push origin HEAD:main
