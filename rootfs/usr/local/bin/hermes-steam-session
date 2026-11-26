@@ -216,6 +216,23 @@ if [ ! -x "${STEAM_HOME}/.local/share/Steam/ubuntu12_32/steam" ] \
     fi
 fi
 
+# The image seed is produced with HOME=/opt/steam-seed, so the seed's ~/.steam
+# entries are ABSOLUTE symlinks pointing back into /opt/steam-seed. `cp -a`
+# preserves them, and Steam resolves its real data root through ~/.steam, so
+# without this fix the live session would silently keep using the (read-only,
+# ephemeral) image seed instead of this persistent HOME — registered library
+# folders would never be seen and saves/logins would be lost on restart. If
+# ~/.steam still points into the seed, drop it so Steam recreates the links
+# against ${STEAM_HOME} on this start. Idempotent: once Steam has rebuilt them
+# to point at ${STEAM_HOME}, this is a no-op on later starts.
+if [ -L "${STEAM_HOME}/.steam/steam" ]; then
+    case "$(readlink "${STEAM_HOME}/.steam/steam" 2>/dev/null)" in
+        /opt/steam-seed*)
+            log "repointing ~/.steam from the image seed to ${STEAM_HOME}"
+            rm -rf "${STEAM_HOME}/.steam" ;;
+    esac
+fi
+
 if [ -n "${HERMES_GAMES_DIR:-}" ]; then
     install -d -o steam -g steam /config/steam/.local/share/Steam/config 2>/dev/null || true
     runuser -u steam -- env \

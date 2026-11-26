@@ -232,6 +232,17 @@ rc=0; HERMES_GAMES_DIR="${G}" HOME="${H}" sh "${HELPER}" >"${OUT}" 2>&1 || rc=$?
     && ok "0-byte vdf: left untouched, exit 0" || notok "0-byte case wrote something"
 
 # ------------------------------------------------------------------
+echo "== case: both steamapps and config registries are written =="
+H="${ROOT}/home_both"; G="${ROOT}/games_both"; mkdir -p "${H}" "${G}"
+HERMES_GAMES_DIR="${G}" HOME="${H}" sh "${HELPER}" >"${OUT}" 2>&1
+SV="${H}/.local/share/Steam/steamapps/libraryfolders.vdf"
+CV="${H}/.local/share/Steam/config/libraryfolders.vdf"
+[ -f "${SV}" ] && [ -f "${CV}" ] \
+    && ok "both: steamapps + config registry files created" || notok "both: a registry file is missing"
+grep -qF "\"${G}\"" "${SV}" && grep -qF "\"${G}\"" "${CV}" \
+    && ok "both: games dir registered in steamapps AND config" || notok "both: games dir missing from a registry"
+
+# ------------------------------------------------------------------
 echo "== case: no tmp litter / atomic swap only on change (global check) =="
 found_litter="$(find "${ROOT}" -name '.libraryfolders.vdf.hermes.*' 2>/dev/null | head -1)"
 [ -z "${found_litter}" ] && ok "no .hermes tmp files anywhere in sandbox" || notok "litter: ${found_litter}"
